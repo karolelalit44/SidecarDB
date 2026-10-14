@@ -10,9 +10,9 @@ services:
     ports:
       - "${DB_PORT:-5435}:5432"
     volumes:
-      - ./docker/init_schema.sql:/docker-entrypoint-initdb.d/01_init_schema.sql:ro
-      - ./docker/seed_data.sql:/docker-entrypoint-initdb.d/02_seed_data.sql:ro
-      - ./docker/setup_roles.sql:/docker-entrypoint-initdb.d/03_setup_roles.sql:ro
+      - ./artifacts/init_schema.sql:/docker-entrypoint-initdb.d/01_init_schema.sql:ro
+      - ./artifacts/seed_data.sql:/docker-entrypoint-initdb.d/02_seed_data.sql:ro
+      - ./artifacts/setup_roles.sql:/docker-entrypoint-initdb.d/03_setup_roles.sql:ro
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d investigation_db"]
