@@ -1,0 +1,53 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: poc-nl-search-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME:-investigation_db}
+      POSTGRES_USER: ${DB_ADMIN_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_ADMIN_PASSWORD:-postgres_master_secret}
+    ports:
+      - "${DB_PORT:-5435}:5432"
+    volumes:
+      - ./docker/init_schema.sql:/docker-entrypoint-initdb.d/01_init_schema.sql:ro
+      - ./docker/seed_data.sql:/docker-entrypoint-initdb.d/02_seed_data.sql:ro
+      - ./docker/setup_roles.sql:/docker-entrypoint-initdb.d/03_setup_roles.sql:ro
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d investigation_db"]
+      interval: 4s
+      timeout: 4s
+      retries: 10
+      start_period: 5s
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: poc-nl-search-app
+    restart: unless-stopped
+    environment:
+      PORT: ${PORT:-8000}
+      HOST: "0.0.0.0"
+      ENVIRONMENT: "development"
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-investigation_db}
+      DB_USER: ${DB_USER:-nl_search_user}
+      DB_PASSWORD: ${DB_PASSWORD:-nl_search_pass_secret}
+      DB_ADMIN_USER: ${DB_ADMIN_USER:-postgres}
+      DB_ADMIN_PASSWORD: ${DB_ADMIN_PASSWORD:-postgres_master_secret}
+      LLM_ENABLED: ${LLM_ENABLED:-false}
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://api.openai.com/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-gpt-4o-mini}
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.0}
+    ports:
+      - "${PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
