@@ -1,4 +1,11 @@
 .env
-docs
-.pytest_cache
-__pycache__
+__pycache__/
+*.pyc
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+*.egg-info/
+build/
+dist/

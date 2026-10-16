@@ -531,3 +531,8 @@ ON CONFLICT (id) DO NOTHING;
 
 -- Cleanup temporary helper function
 DROP FUNCTION IF EXISTS generate_test_vector(real);
+
+-- Refresh planner statistics. The engine reads pg_class.reltuples and
+-- pg_stats.n_distinct to decide which columns hold small closed vocabularies,
+-- so without this they are empty and no values are discovered at runtime.
+ANALYZE;
