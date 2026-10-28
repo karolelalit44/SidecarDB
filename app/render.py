@@ -1,7 +1,7 @@
-from .constants import NULL_TESTS, OPERATORS, PATTERN_OPERATORS, WILDCARD
+from .constants import COUNT_ALIAS, NULL_TESTS, OPERATORS, PATTERN_OPERATORS, WILDCARD
 from .exceptions import SecurityError
 from .guard import like_literal, literal, quote
-from .types import ForeignKeyInfo, QueryIntent, QueryPlan, SchemaGraph
+from .types import ForeignKeyInfo, MeasureFunction, QueryIntent, QueryPlan, SchemaGraph
 
 
 def find_relation(left: str, right: str, graph: SchemaGraph) -> ForeignKeyInfo | None:
@@ -33,22 +33,50 @@ def qualify(column: str, plan: QueryPlan, graph: SchemaGraph) -> str:
     return f"{quote(owner)}.{quote(column)}" if owner else quote(column)
 
 
+def content_columns(plan: QueryPlan, graph: SchemaGraph) -> list[str]:
+    """The plan's columns, minus vector columns."""
+    table = graph.tables.get(plan.table)
+    if table is None:
+        return list(plan.projection)
+    vectors = set(table.embedding_columns)
+    return [c for c in plan.projection if c not in vectors]
+
+
 def projection(plan: QueryPlan, graph: SchemaGraph) -> str:
     if plan.intent is QueryIntent.count:
-        return "COUNT(*) AS record_count"
+        return f"COUNT(*) AS {COUNT_ALIAS}"
 
     if plan.intent is QueryIntent.aggregate:
-        column = qualify(plan.measure_column, plan, graph)
-        alias = f"{plan.measure_function.value}_of_{plan.measure_column}"
-        return f"{quote(plan.measure_function.value.upper())}({column}) AS {quote(alias)}"
+        if plan.measure_function is MeasureFunction.count:
+            measure_sql = f"COUNT(*) AS {COUNT_ALIAS}"
+        else:
+            column = qualify(plan.measure_column, plan, graph)
+            alias = f"{plan.measure_function.value}_of_{plan.measure_column}"
+            function = plan.measure_function.value.upper()
+            measure_sql = f"{function}({column}) AS {quote(alias)}"
 
-    if plan.intent is QueryIntent.distinct and plan.projection:
-        return "DISTINCT " + ", ".join(qualify(c, plan, graph) for c in plan.projection)
+        if plan.group_by:
+            group_cols = ", ".join(qualify(c, plan, graph) for c in plan.group_by)
+            return f"{group_cols}, {measure_sql}"
+        return measure_sql
 
-    if plan.projection:
-        return ", ".join(qualify(c, plan, graph) for c in plan.projection)
+    columns = content_columns(plan, graph)
 
-    return WILDCARD
+    if plan.intent is QueryIntent.distinct and columns:
+        return "DISTINCT " + ", ".join(qualify(c, plan, graph) for c in columns)
+
+    if columns:
+        return ", ".join(qualify(c, plan, graph) for c in columns)
+
+    table = graph.tables.get(plan.table)
+    plain = (
+        [c.name for c in table.columns if c.name not in set(table.embedding_columns)]
+        if table
+        else []
+    )
+    if not plain:
+        return WILDCARD
+    return ", ".join(qualify(c, plan, graph) for c in plain)
 
 
 def joins(plan: QueryPlan, graph: SchemaGraph) -> str:
@@ -56,8 +84,7 @@ def joins(plan: QueryPlan, graph: SchemaGraph) -> str:
     for related in plan.related_tables:
         relation = find_relation(plan.table, related, graph)
         if relation is None:
-            parts.append(f", {quote(related)}")
-            continue
+            raise SecurityError(f"No foreign key joins {plan.table} to {related}.")
         parts.append(
             f" JOIN {quote(related)}"
             f" ON {quote(plan.table)}.{quote(relation.from_column)}"
@@ -104,7 +131,7 @@ def build(plan: QueryPlan, graph: SchemaGraph) -> str:
         else ""
     )
     order = ""
-    if plan.order_by:
+    if plan.order_by and plan.intent is not QueryIntent.count:
         direction = "DESC" if plan.descending else "ASC"
         order = f" ORDER BY {qualify(plan.order_by, plan, graph)} {direction}"
     return (

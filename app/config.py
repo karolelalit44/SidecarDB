@@ -1,4 +1,4 @@
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     log_dependency_level: LogLevel
     log_namespace: str
     log_sql: bool
+    log_llm_payloads: bool
 
     cors_allow_origins: CsvList
     cors_allow_methods: CsvList
@@ -49,6 +50,7 @@ class Settings(BaseSettings):
     max_limit: int
     max_join_depth: int
     max_plan_attempts: int
+    repair_char_budget: int
     max_schema_tables: int
     max_schema_columns: int
 
@@ -56,9 +58,13 @@ class Settings(BaseSettings):
     llm_base_url: str
     llm_model: str
     llm_temperature: float
+    llm_repair_temperature: float
     llm_max_tokens: int
     llm_timeout_seconds: float
     llm_retries: int
+    llm_context_tokens: int
+    llm_chars_per_token: int
+    llm_extra_body: dict[str, Any]
 
     embedding_enabled: bool
     embedding_model: str
@@ -77,6 +83,8 @@ class Settings(BaseSettings):
     value_sample_limit: int
     value_sample_max: int
     value_sample_max_length: int
+    value_sample_denylist: CsvList
+    value_sample_sensitive_marker: str
 
     error_message_max_chars: int
     vector_literal_precision: int
@@ -96,12 +104,20 @@ class Settings(BaseSettings):
         "cors_allow_origins",
         "cors_allow_methods",
         "cors_allow_headers",
+        "value_sample_denylist",
         mode="before",
     )
     @classmethod
     def _split_csv(cls, value: object) -> object:
         if isinstance(value, str):
             return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("llm_extra_body", mode="before")
+    @classmethod
+    def _blank_extra_body_is_empty(cls, value: object) -> object:
+        if value is None or value == "":
+            return {}
         return value
 
 

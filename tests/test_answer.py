@@ -70,8 +70,24 @@ def test_projected_column_names_are_bound():
     assert _bind("Case {order_reference}.", FETCH_ROWS, QueryIntent.retrieve) == "Case R-1."
 
 
-def test_unknown_placeholder_is_left_visible():
-    assert _bind("{nope}", FETCH_ROWS, QueryIntent.retrieve) == "{nope}"
+def test_unknown_placeholder_is_not_shown_to_the_caller():
+    """Raw template syntax must never reach the user.
+
+    A model will invent a placeholder that names nothing in the result. An
+    empty string is the signal for the caller to narrate the rows instead;
+    echoing "{nope}" would present template markup as if it were the answer.
+    """
+    assert _bind("{nope}", FETCH_ROWS, QueryIntent.retrieve) == ""
+
+
+def test_one_unbound_placeholder_discards_the_whole_template():
+    rows = [{"status": "open"}]
+    assert _bind("Open: {status} ({nope})", rows, QueryIntent.retrieve) == ""
+
+
+def test_bound_placeholder_alongside_none_still_renders():
+    rows = [{"status": "open"}]
+    assert _bind("Status {status}.", rows, QueryIntent.retrieve) == "Status open."
 
 
 def test_empty_template_renders_empty():

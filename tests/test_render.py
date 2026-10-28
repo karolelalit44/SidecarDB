@@ -23,13 +23,51 @@ def test_aggregate_plan(any_graph: SchemaGraph):
         ),
         any_graph,
     )
-    assert f'"SUM"("{column}")' in sql
+    # The function name must stay unquoted: PostgreSQL would look for "SUM".
+    assert f'SUM("{column}")' in sql
     assert f'AS "sum_of_{column}"' in sql
 
 
-def test_retrieve_defaults_to_star(ecommerce: SchemaGraph):
+def test_retrieve_defaults_to_every_column(ecommerce: SchemaGraph):
+    """The wildcard is expanded so a vector column can never be selected by `*`."""
     sql = render.build(QueryPlan(intent=QueryIntent.retrieve, table="orders"), ecommerce)
-    assert sql == 'SELECT * FROM "orders"'
+    for column in ecommerce.tables["orders"].column_names:
+        assert f'"{column}"' in sql
+    assert "SELECT *" not in sql
+
+
+def test_a_vector_column_is_never_projected(ecommerce: SchemaGraph):
+    """A vector column is an index, not content: it would flood the prompt."""
+    plan = QueryPlan(intent=QueryIntent.retrieve, table="products")
+    assert "semantic_vector" not in render.build(plan, ecommerce)
+
+
+def test_an_explicitly_named_vector_column_is_dropped(ecommerce: SchemaGraph):
+    plan = QueryPlan(
+        intent=QueryIntent.retrieve,
+        table="products",
+        projection=["title", "semantic_vector"],
+    )
+    sql = render.build(plan, ecommerce)
+    assert '"title"' in sql
+    assert "semantic_vector" not in sql
+
+
+def test_the_wildcard_survives_when_every_column_is_a_vector():
+    from app.types import ColumnInfo, SchemaGraph, TableInfo
+
+    graph = SchemaGraph(
+        tables={
+            "blobs": TableInfo(
+                name="blobs",
+                columns=[ColumnInfo(name="embedding", data_type="vector")],
+                embedding_columns=["embedding"],
+            )
+        }
+    )
+    assert render.build(QueryPlan(intent=QueryIntent.retrieve, table="blobs"), graph) == (
+        'SELECT * FROM "blobs"'
+    )
 
 
 def test_projection_is_quoted(ecommerce: SchemaGraph):
@@ -143,13 +181,26 @@ def test_join_swaps_columns_when_reversed(ecommerce: SchemaGraph):
     assert '"customers"."id" = "orders"."customer_id"' in sql
 
 
-def test_unconnected_table_produces_cross_join(ecommerce: SchemaGraph, library: SchemaGraph):
+def test_an_unjoinable_related_table_is_refused_not_cross_joined(
+    ecommerce: SchemaGraph, library: SchemaGraph
+):
+    """A cross join returns a cartesian product dressed up as an answer."""
     merged = SchemaGraph(tables={**ecommerce.tables, **library.tables})
-    sql = render.build(
-        QueryPlan(intent=QueryIntent.retrieve, table="orders", related_tables=["authors"]),
-        merged,
-    )
-    assert ', "authors"' in sql
+    with pytest.raises(SecurityError):
+        render.build(
+            QueryPlan(intent=QueryIntent.retrieve, table="orders", related_tables=["authors"]),
+            merged,
+        )
+
+
+def test_a_table_reachable_but_not_directly_joined_is_refused(
+    ecommerce: SchemaGraph, healthcare: SchemaGraph
+):
+    """customers -> products is two hops; the renderer can only express one."""
+    merged = SchemaGraph(tables={**ecommerce.tables, **healthcare.tables})
+    plan = QueryPlan(intent=QueryIntent.retrieve, table="customers", related_tables=["products"])
+    with pytest.raises(SecurityError):
+        render.build(plan, merged)
 
 
 def test_group_and_order(ecommerce: SchemaGraph):

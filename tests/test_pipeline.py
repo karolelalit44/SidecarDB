@@ -3,6 +3,7 @@ import pytest
 import app.answer as answer_module
 import app.execute as execute_module
 import app.graph as graph_module
+from app.config import settings
 from app.exceptions import PlanningError, QueryError
 from app.service import SearchService
 from app.types import MeasureFunction, QueryIntent, QueryPlan
@@ -33,7 +34,7 @@ class FakeChat:
 
 
 def _json_chat(chat):
-    async def fake_complete_json(_system_prompt, user_prompt):
+    async def fake_complete_json(_system_prompt, user_prompt, _temperature=None):
         chat.plan_calls.append(user_prompt)
         return chat.plan.model_dump(mode="json", exclude_none=True)
 
@@ -249,10 +250,11 @@ async def test_link_tolerates_none_index(ecommerce):
     from app.graph import link
     from app.types import RetrievalMode
 
-    tables, mode, retrieved = await link("show orders", ecommerce, None)
+    tables, mode, retrieved, relevance = await link("show orders", ecommerce, None)
     assert mode == RetrievalMode.catalog
     assert len(tables) > 0
     assert retrieved == []
+    assert relevance == {}
 
 
 async def test_collect_values_tolerates_exceptions(ecommerce, monkeypatch):
@@ -267,8 +269,43 @@ async def test_collect_values_tolerates_exceptions(ecommerce, monkeypatch):
     assert isinstance(samples, dict)
 
 
+async def test_collect_values_respect_column_relevance(ecommerce, monkeypatch):
+    """Only the columns the question is about are worth a query each."""
+    from app.graph import collect_values
+
+    queries = []
+
+    async def counting_run(sql):
+        queries.append(sql)
+        return [{"value": "a"}, {"value": "b"}]
+
+    monkeypatch.setattr(execute_module, "run", counting_run)
+
+    samples = await collect_values(
+        ecommerce,
+        ["orders"],
+        None,
+        {"orders.order_state": 0.9, "customers.city": 0.8},
+    )
+
+    assert set(samples.get("orders", {})) == {"order_state"}
+    assert len(queries) == 1
+    assert "order_state" in queries[0]
+
+
+async def test_collect_values_fall_back_when_nothing_is_relevant(ecommerce, monkeypatch):
+    """A weak embedding match must not strip the planner of all vocabulary."""
+    from app.graph import collect_values
+
+    async def fake_run(_sql):
+        return [{"value": "a"}, {"value": "b"}]
+
+    monkeypatch.setattr(execute_module, "run", fake_run)
+    samples = await collect_values(ecommerce, ["orders"], None, {})
+    assert samples
+
+
 async def test_collect_values_are_cached_per_table(ecommerce, monkeypatch):
-    """Samples change only when the catalog does, so they are memoised."""
     from app.graph import collect_values
 
     queries = []
@@ -345,7 +382,7 @@ async def test_rejected_plan_is_retried(wired, monkeypatch):
     """A plan naming a table that does not exist comes back for repair."""
     calls = []
 
-    async def always_ghost(_system_prompt, user_prompt):
+    async def always_ghost(_system_prompt, user_prompt, _temperature=None):
         calls.append(user_prompt)
         return {"intent": "count", "table": "ghost_table"}
 
@@ -356,3 +393,48 @@ async def test_rejected_plan_is_retried(wired, monkeypatch):
 
     assert len(calls) > 1, "the repair loop must issue more than one planner call"
     assert "rejected" in calls[-1], "the later attempt must carry the rejection reason"
+
+
+async def test_repair_attempts_sample_at_a_different_temperature(wired, monkeypatch):
+    """A repair that cannot differ from the reply it repairs is not a repair.
+
+    At the configured sampling temperature the model reproduces a rejected plan
+    verbatim, so retrying costs the full model latency to reach the same
+    failure. The repair attempts must therefore sample.
+    """
+    temperatures = []
+
+    async def always_ghost(_system_prompt, user_prompt, temperature=None):
+        temperatures.append(temperature)
+        return {"intent": "count", "table": "ghost_table"}
+
+    monkeypatch.setattr(graph_module, "complete_json", always_ghost)
+
+    with pytest.raises(PlanningError):
+        await wired["service"].search("how many")
+
+    assert temperatures, "the planner must have been called"
+    first = temperatures[0]
+    assert first == settings.llm_temperature, "the first attempt is not a repair"
+    assert settings.llm_repair_temperature != first, "the repair must sample differently"
+    for later in temperatures[1:]:
+        assert later == settings.llm_repair_temperature
+
+
+async def test_first_plan_attempt_is_not_a_repair(ecommerce, monkeypatch):
+    """The initial attempt runs at the configured temperature."""
+    from app.graph import plan
+
+    seen = []
+
+    async def record_temperature(_system_prompt, _user_prompt, temperature=None):
+        seen.append(temperature)
+        return {"intent": "count", "table": "orders"}
+
+    monkeypatch.setattr(graph_module, "complete_json", record_temperature)
+
+    result, error = await plan("how many orders", ecommerce, ["orders"], {})
+
+    assert error is None
+    assert result is not None
+    assert seen == [settings.llm_temperature]

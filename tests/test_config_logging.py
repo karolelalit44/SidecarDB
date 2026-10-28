@@ -47,7 +47,9 @@ def test_example_env_has_no_blank_value_for_a_required_setting():
     text = (ROOT / ".env.example").read_text(encoding="utf-8")
     values = dict(line.split("=", 1) for line in text.splitlines() if line.strip() and "=" in line)
     blank = [key for key, value in values.items() if value == ""]
-    assert blank == ["LLM_API_KEY"]
+    # The credential has to be supplied by the operator. The denylist is empty by
+    # design: it is an optional blocklist, and empty means "nothing extra to hide".
+    assert blank == ["LLM_API_KEY", "VALUE_SAMPLE_DENYLIST"]
 
 
 def test_invalid_log_level_is_rejected():

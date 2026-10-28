@@ -35,12 +35,16 @@ def _function_names(node) -> set[str]:
 
 
 def _is_aggregate(tree: exp.Expression) -> bool:
-    """True when the statement collapses rows with GROUP BY or an aggregate function.
-
-    A row cap is meaningless there -- the result is already one row per group -- and
-    leaving it out keeps the SQL shown to the caller honest.
-    """
+    """Check if expression contains GROUP BY or aggregate functions."""
     return tree.find(exp.Group) is not None or any(True for _ in tree.find_all(exp.AggFunc))
+
+
+def _rewrites_meaning(tree: exp.Expression, statement: str) -> bool:
+    """Return True if sqlglot rewrite alters semantic meaning of the SQL."""
+    produced = any(True for _ in tree.find_all(exp.NullSafeEQ))
+    if not produced:
+        return False
+    return "IS NOT DISTINCT FROM" not in statement.upper()
 
 
 def validate(sql: str, graph: SchemaGraph | None = None) -> str:
@@ -74,9 +78,11 @@ def validate(sql: str, graph: SchemaGraph | None = None) -> str:
                 raise SecurityError("Statement references a table outside the catalog.")
 
     limit = tree.find(exp.Limit)
+    rewritten = False
     if limit is None:
         if not _is_aggregate(tree):
             tree = tree.limit(settings.default_limit)
+            rewritten = True
     elif isinstance(limit.expression, exp.Literal) and limit.expression.is_int:
         try:
             value = int(limit.expression.this)
@@ -84,7 +90,13 @@ def validate(sql: str, graph: SchemaGraph | None = None) -> str:
             value = settings.default_limit
         if value > settings.max_limit:
             limit.expression.set("this", str(settings.max_limit))
+            rewritten = True
 
+    if not rewritten:
+        return statement
+
+    if _rewrites_meaning(tree, statement):
+        raise SecurityError("Statement uses an operator this validator cannot render faithfully.")
     return tree.sql(dialect=DIALECT)
 
 

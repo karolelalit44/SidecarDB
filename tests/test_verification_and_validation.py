@@ -91,3 +91,13 @@ def test_search_endpoint_handles_risky_query():
     data = response.json()
     assert data["error"] == "QueryError"
     assert "disallowed symbols" in data["message"]
+
+
+def test_search_endpoint_handles_query_too_long():
+    client = TestClient(app, raise_server_exceptions=False)
+    response = client.post("/api/v1/search", json={"query": "a" * (settings.max_query_length + 1)})
+    assert response.status_code == 400
+    data = response.json()
+    assert data["error"] == "QueryError"
+    assert "too long" in data["message"].lower()
+    assert str(settings.max_query_length) in data["message"]

@@ -75,6 +75,61 @@ def test_cte_aliases_are_allowed(ecommerce: SchemaGraph):
     )
 
 
+# --- the validator must not change what a statement means -------------------
+
+
+DISTANCE_SQL = (
+    'SELECT "order_reference", "embedding" <=> $1::vector AS similarity FROM "orders" '
+    'ORDER BY "embedding" <=> $1::vector LIMIT 10'
+)
+
+
+def test_distance_operator_survives_validation(ecommerce: SchemaGraph):
+    """The pgvector distance operator must reach the database intact.
+
+    sqlglot has no node for it and re-emits `<=>` as `IS NOT DISTINCT FROM`, which
+    turns a nearest-neighbour search into an equality test that matches nothing.
+    """
+    out = guard.validate(DISTANCE_SQL, ecommerce)
+    assert "<=>" in out
+    assert "IS NOT DISTINCT FROM" not in out
+
+
+def test_a_statement_needing_no_edit_is_returned_verbatim(ecommerce: SchemaGraph):
+    """Nothing to rewrite means nothing is re-serialised."""
+    sql = 'SELECT "order_reference" FROM "orders" LIMIT 10'
+    assert guard.validate(sql, ecommerce) == sql
+
+
+def test_a_real_null_safe_comparison_is_not_refused(ecommerce: SchemaGraph):
+    """`IS NOT DISTINCT FROM` written by hand must still validate."""
+    sql = (
+        'SELECT "order_reference" FROM "orders" '
+        'WHERE "order_reference" IS NOT DISTINCT FROM $1 LIMIT 10'
+    )
+    assert "IS NOT DISTINCT FROM" in guard.validate(sql, ecommerce)
+
+
+def test_the_distance_operator_still_gets_safety_checks(ecommerce: SchemaGraph):
+    """Skipping the rewrite must not skip the allowlist."""
+    from app.exceptions import SecurityError
+
+    with pytest.raises(SecurityError):
+        guard.validate('SELECT pg_sleep(1) <=> $1::vector FROM "orders" LIMIT 10', ecommerce)
+
+
+def test_a_distance_statement_naming_an_unknown_table_is_refused(ecommerce: SchemaGraph):
+    from app.exceptions import SecurityError
+
+    with pytest.raises(SecurityError):
+        guard.validate('SELECT "x" <=> $1::vector FROM "ghost" LIMIT 10', ecommerce)
+
+
+def test_bound_parameters_are_not_mistaken_for_a_rewrite(ecommerce: SchemaGraph):
+    sql = 'SELECT * FROM "orders" WHERE "order_reference" = $1 LIMIT 10'
+    assert guard.validate(sql, ecommerce) == sql
+
+
 def test_limit_is_injected(ecommerce: SchemaGraph):
     assert "LIMIT" in guard.validate("SELECT * FROM orders", ecommerce)
 

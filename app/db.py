@@ -1,6 +1,7 @@
 import asyncio
 
 from .config import settings
+from .constants import VECTOR_TYPE
 from .exceptions import ConfigurationError, SchemaError
 from .logging_config import get_logger
 from .types import ForeignKeyInfo, IndexedColumn, SchemaGraph, TableInfo
@@ -98,12 +99,7 @@ class Database:
         self._pool = None
 
     async def connect(self, *, readonly: bool = True) -> None:
-        """Opens the pool.
-
-        readonly=True is what the service must use. The maintenance script, whose
-        whole job is to write embeddings back, passes readonly=False -- the flag
-        exists for that one caller and defaults to the safe value.
-        """
+        """readonly=False is for the backfill script, which writes embeddings back."""
         import asyncpg
 
         async def _init(conn):
@@ -203,6 +199,7 @@ class Database:
                     "primary_key": row["name"] in primary_by_table.get(table_name, []),
                     "description": row["description"],
                     "distinct_estimate": _distinct_count(raw, row_estimates.get(table_name, 0)),
+                    "dimensions": _vector_width(row["data_type"]),
                 }
             )
 
@@ -250,6 +247,22 @@ def _distinct_count(n_distinct: float | None, row_estimate: int) -> float:
     if n_distinct < 0:
         return abs(n_distinct) * row_estimate
     return n_distinct
+
+
+def _vector_width(data_type: str) -> int | None:
+    """`vector(1536)` -> 1536; a bare `vector` -> None (any width accepted)."""
+    if not data_type.startswith(VECTOR_TYPE):
+        return None
+    opening = data_type.find("(")
+    if opening == -1:
+        return None
+    closing = data_type.find(")", opening)
+    if closing == -1:
+        return None
+    try:
+        return int(data_type[opening + 1 : closing])
+    except ValueError:
+        return None
 
 
 def join_path(source: str, target: str, graph: SchemaGraph, max_depth: int):

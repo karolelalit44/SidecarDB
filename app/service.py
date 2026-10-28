@@ -18,10 +18,7 @@ _BLOCKED_CATEGORIES = ("Cc", "Cf", "Cs")
 
 
 def validate_query(text: str) -> tuple[bool, str | None]:
-    """Reject control characters and the punctuation shapes of injected SQL.
-
-    Returns (True, None) when the question is safe, otherwise (False, reason).
-    """
+    """Rejects control characters and the punctuation shapes of injected SQL."""
     if not text:
         return False, "The query is empty."
 
@@ -35,6 +32,9 @@ def validate_query(text: str) -> tuple[bool, str | None]:
         if unicodedata.category(ch) in _BLOCKED_CATEGORIES:
             return False, "Query contains unsupported control or formatting characters."
 
+    if not any(ch.isalnum() for ch in text):
+        return False, "Query must contain at least one alphanumeric character."
+
     return True, None
 
 
@@ -42,8 +42,6 @@ class SearchService:
     def __init__(self):
         self._graph: SchemaGraph | None = None
         self._index: SchemaIndex | None = None
-        # Sampled column values, keyed by table. Valid only for the catalog
-        # currently held in _graph, so it is dropped whenever that is rebuilt.
         self._samples: dict[str, dict[str, list[str]]] = {}
 
     async def startup(self) -> None:
@@ -83,7 +81,9 @@ class SearchService:
         if len(query) < settings.min_query_length:
             raise QueryError("The question is too short.")
         if len(query) > settings.max_query_length:
-            raise QueryError("The question is too long.")
+            raise QueryError(
+                f"The question is too long (maximum {settings.max_query_length} characters)."
+            )
 
         is_safe, reason = validate_query(query)
         if not is_safe:
@@ -92,15 +92,48 @@ class SearchService:
 
         started = time.perf_counter()
         graph = await self.schema()
-        outcome = await graph_module.run(query, graph, self._index, self._samples)
+        logger.debug(
+            "[%s] catalog ready: %d tables, index=%s",
+            request_id,
+            len(graph.tables),
+            "built" if self._index is not None else "absent",
+        )
+
+        try:
+            outcome = await graph_module.run(query, graph, self._index, self._samples)
+        except Exception as exc:
+            logger.error(
+                "[%s] search failed after %d ms: %s: %s",
+                request_id,
+                round((time.perf_counter() - started) * 1000, settings.elapsed_precision),
+                type(exc).__name__,
+                exc,
+                exc_info=settings.log_llm_payloads,
+            )
+            raise
+
         rows = outcome.rows
 
         if not rows:
             answer = settings.no_records_message
+            logger.debug(
+                "[%s] no rows returned; using the configured no-records message",
+                request_id,
+            )
         elif outcome.plan.template:
             answer = render_template(outcome.plan.template, rows, outcome.plan.intent)
+            if answer:
+                logger.debug("[%s] answered from the plan template", request_id)
+            else:
+                answer = await narrate(query, rows)
+                logger.debug(
+                    "[%s] template was unusable; answered by narration over %d rows",
+                    request_id,
+                    len(rows),
+                )
         else:
             answer = await narrate(query, rows)
+            logger.debug("[%s] answered by narration over %d rows", request_id, len(rows))
 
         elapsed = round((time.perf_counter() - started) * 1000, settings.elapsed_precision)
         logger.info(

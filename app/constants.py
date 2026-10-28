@@ -34,12 +34,19 @@ PATTERN_OPERATORS = ("LIKE", "ILIKE")
 NULL_TESTS = ("IS NULL", "IS NOT NULL")
 OPERATORS = (*COMPARISON_OPERATORS, *PATTERN_OPERATORS, *NULL_TESTS)
 
+DEFAULT_COMPARISON = COMPARISON_OPERATORS[0]
+
+EQUALITY_ALIASES = ("==",)
+
 TYPE_CATEGORY_NUMERIC = "N"
 TYPE_CATEGORY_STRING = "S"
 TYPE_CATEGORY_UNKNOWN = "X"
 
 VECTOR_CAST = "::vector"
+VECTOR_TYPE = "vector"
 SIMILARITY_ALIAS = "similarity"
+
+COUNT_ALIAS = "record_count"
 
 
 STATUS_OK = "ok"
@@ -53,6 +60,24 @@ LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
 FENCE = "```"
 JSON_TAG = "json"
+
+METADATA_SOURCES = ("response_metadata", "additional_kwargs")
+
+FINISH_REASON_FIELD = "finish_reason"
+FINISH_REASON_LENGTH = "length"
+REASONING_FIELD = "reasoning_content"
+USAGE_FIELD = "usage_metadata"
+SERVED_MODEL_FIELD = "model_name"
+COMPLETION_TOKENS_FIELD = "output_tokens"
+PROMPT_TOKENS_FIELD = "input_tokens"
+
+REASONING_BUDGET_WARNING = (
+    "The model spent its entire completion budget reasoning and returned no answer. "
+    "Raise LLM_MAX_TOKENS or turn the model's thinking mode off."
+)
+REASONING_EMPTY_RESPONSE = (
+    "The model used its entire completion budget without returning an answer. Raise LLM_MAX_TOKENS."
+)
 
 JSON_INSTRUCTION = (
     "Reply with one JSON object and nothing else. No prose, no explanation, "
@@ -101,3 +126,5 @@ COLOURS = {
 
 
 WILDCARD = "*"
+
+TRUNCATION_MARK = " [...]"

@@ -1,4 +1,5 @@
 import json
+import time
 from functools import lru_cache
 from typing import Any
 
@@ -7,13 +8,30 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from .config import settings
-from .constants import FENCE, JSON_INSTRUCTION, JSON_TAG
+from .constants import (
+    COMPLETION_TOKENS_FIELD,
+    FENCE,
+    FINISH_REASON_FIELD,
+    FINISH_REASON_LENGTH,
+    JSON_INSTRUCTION,
+    JSON_TAG,
+    METADATA_SOURCES,
+    PROMPT_TOKENS_FIELD,
+    REASONING_BUDGET_WARNING,
+    REASONING_EMPTY_RESPONSE,
+    REASONING_FIELD,
+    SERVED_MODEL_FIELD,
+    TRUNCATION_MARK,
+    USAGE_FIELD,
+)
 from .exceptions import ConfigurationError, PlanningError, ProviderError
+from .logging_config import get_logger
+
+logger = get_logger("llm")
 
 
 def chat_model() -> BaseChatModel:
-    # The credential check stays outside the cache so it runs on every call and a
-    # missing key always surfaces, whatever was built earlier.
+    # Outside the cache, so a missing key always surfaces.
     if not settings.llm_api_key:
         raise ConfigurationError("LLM_API_KEY must be set in .env")
     return _client()
@@ -21,7 +39,7 @@ def chat_model() -> BaseChatModel:
 
 @lru_cache(maxsize=1)
 def _client() -> BaseChatModel:
-    """One client for the process, so the HTTP connection to the provider is reused."""
+    """One client per process, so the provider connection is reused."""
     return ChatOpenAI(
         model=settings.llm_model,
         base_url=settings.llm_base_url,
@@ -30,6 +48,7 @@ def _client() -> BaseChatModel:
         max_tokens=settings.llm_max_tokens,
         timeout=settings.llm_timeout_seconds,
         max_retries=settings.llm_retries,
+        extra_body=settings.llm_extra_body or None,
     )
 
 
@@ -97,17 +116,129 @@ def _balanced_end(text: str, start: int) -> int | None:
     return None
 
 
-async def complete_json(system_prompt: str, user_prompt: str) -> dict[str, Any]:
-    # chat_model() is outside the try so ConfigurationError keeps its own meaning.
+def prompt_chars(reserve: int) -> int:
+    """Characters available for a prompt body on this model."""
+    return max(settings.llm_context_tokens - reserve, 0) * settings.llm_chars_per_token
+
+
+def trim(text: str, limit: int) -> str:
+    """Shortens text to limit characters, marking that it was cut."""
+    if len(text) <= limit:
+        return text
+    if limit <= len(TRUNCATION_MARK):
+        return text[:limit]
+    return text[: limit - len(TRUNCATION_MARK)] + TRUNCATION_MARK
+
+
+def provider_metadata(result: Any) -> dict[str, Any]:
+    """Flatten reply metadata from response_metadata or additional_kwargs."""
+    merged: dict[str, Any] = {}
+    for source_name in METADATA_SOURCES:
+        source = getattr(result, source_name, None)
+        if isinstance(source, dict):
+            merged.update(source)
+    return merged
+
+
+def _answer(result: Any) -> str:
+    content = getattr(result, "content", None)
+    return content if isinstance(content, str) else ""
+
+
+def _reasoning(meta: dict[str, Any]) -> str:
+    scratchpad = meta.get(REASONING_FIELD)
+    return scratchpad if isinstance(scratchpad, str) else ""
+
+
+def _as_int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _empty_response_message(finish_reason: Any, reasoning: str) -> str:
+    """Generate descriptive error message for an empty model response."""
+    if reasoning:
+        return REASONING_BUDGET_WARNING
+    if finish_reason == FINISH_REASON_LENGTH:
+        return REASONING_EMPTY_RESPONSE
+    return "The model returned an empty response."
+
+
+async def complete_json(
+    system_prompt: str, user_prompt: str, temperature: float | None = None
+) -> dict[str, Any]:
+    # Outside the try, so ConfigurationError keeps its own meaning.
     model = chat_model()
+    system_text = f"{system_prompt}\n\n{JSON_INSTRUCTION}"
+    started = time.perf_counter()
+    effective = settings.llm_temperature if temperature is None else temperature
+    runnable = model if temperature is None else model.bind(temperature=effective)
+
+    logger.debug(
+        "LLM request model=%s system_chars=%d user_chars=%d total_chars=%d "
+        "max_tokens=%d temperature=%s extra_body=%s",
+        settings.llm_model,
+        len(system_text),
+        len(user_prompt),
+        len(system_text) + len(user_prompt),
+        settings.llm_max_tokens,
+        effective,
+        sorted(settings.llm_extra_body),
+    )
+
     try:
-        result = await model.ainvoke(
+        result = await runnable.ainvoke(
             [
-                SystemMessage(content=f"{system_prompt}\n\n{JSON_INSTRUCTION}"),
+                SystemMessage(content=system_text),
                 HumanMessage(content=user_prompt),
             ]
         )
     except Exception as exc:
+        logger.error(
+            "LLM transport failure after %d ms: %s: %s",
+            int((time.perf_counter() - started) * 1000),
+            type(exc).__name__,
+            exc,
+            exc_info=settings.log_llm_payloads,
+        )
         raise ProviderError("The model provider could not be reached.") from exc
-    # Outside the try: a malformed reply is a planning fault, not a transport fault.
-    return extract_json(result.content or "")
+
+    meta = provider_metadata(result)
+    usage = meta.get(USAGE_FIELD)
+    usage = usage if isinstance(usage, dict) else {}
+    content = _answer(result)
+    reasoning = _reasoning(meta)
+    finish_reason = meta.get(FINISH_REASON_FIELD)
+
+    logger.debug(
+        "LLM reply in %d ms: finish=%s served_model=%s content_chars=%d "
+        "reasoning_chars=%d prompt_tokens=%s completion_tokens=%s",
+        int((time.perf_counter() - started) * 1000),
+        finish_reason,
+        meta.get(SERVED_MODEL_FIELD),
+        len(content),
+        len(reasoning),
+        _as_int(usage.get(PROMPT_TOKENS_FIELD)),
+        _as_int(usage.get(COMPLETION_TOKENS_FIELD)),
+    )
+
+    if not content:
+        logger.warning(
+            "Empty model reply: finish=%s reasoning_chars=%d prompt_tokens=%s "
+            "completion_tokens=%s of max_tokens=%d",
+            finish_reason,
+            len(reasoning),
+            _as_int(usage.get(PROMPT_TOKENS_FIELD)),
+            _as_int(usage.get(COMPLETION_TOKENS_FIELD)),
+            settings.llm_max_tokens,
+        )
+        if settings.log_llm_payloads and reasoning:
+            logger.debug("Reasoning scratchpad: %s", reasoning)
+        raise PlanningError(_empty_response_message(finish_reason, reasoning))
+
+    try:
+        return extract_json(content)
+    except PlanningError as exc:
+        logger.warning("Unparseable model reply (%d chars): %s", len(content), exc)
+        if settings.log_llm_payloads:
+            logger.debug("Raw reply: %s", content)
+        raise

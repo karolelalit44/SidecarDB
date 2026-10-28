@@ -43,8 +43,6 @@ class SchemaIndex:
             return self
 
         try:
-            # Encoding a large catalog is seconds of CPU, so it runs off the event
-            # loop rather than stalling every in-flight request behind it.
             self._vectors = await embedder.aencode(texts)
             logger.info("Schema index built over %d elements", len(texts))
         except EmbeddingError as exc:
@@ -64,7 +62,11 @@ class SchemaIndex:
 
         precision = settings.retrieval_score_precision
         hits = [
-            Hit(table=self._table_of[key], score=round(dot(query_vector, vector), precision))
+            Hit(
+                table=self._table_of[key],
+                subject=key,
+                score=round(dot(query_vector, vector), precision),
+            )
             for key, vector in zip(self._keys, self._vectors, strict=True)
         ]
         hits.sort(key=lambda hit: hit.score, reverse=True)
@@ -80,6 +82,16 @@ class SchemaIndex:
 
         ordered = sorted(best.items(), key=lambda pair: pair[1], reverse=True)
         return [name for name, _score in ordered[:limit]]
+
+    async def columns_for(self, question: str, min_score: float) -> dict[str, float]:
+        """Return similarity scores for columns above the threshold."""
+        scored: dict[str, float] = {}
+        for hit in await self.search(question, settings.retrieval_top_k):
+            if hit.score < min_score or "." not in hit.subject:
+                continue
+            table, column = hit.subject.rsplit(".", 1)
+            scored[f"{table}.{column}"] = hit.score
+        return scored
 
 
 def _words(name: str) -> str:

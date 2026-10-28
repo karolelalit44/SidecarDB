@@ -27,11 +27,7 @@ class PlanningError(SearchError):
 
 
 class ProviderError(SearchError):
-    """The model endpoint could not be reached or returned a transport-level failure.
-
-    Distinct from PlanningError so that an outage is never mistaken for a bad plan:
-    retrying a planner call cannot fix a provider that is down.
-    """
+    """Provider outage error."""
 
     status_code = 503
 

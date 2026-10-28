@@ -19,10 +19,11 @@ from .verification import verification_service
 
 logging_config.configure()
 error_logger = logging_config.get_logger("error")
+logger = logging_config.get_logger("api")
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     await verification_service.verify()
     await service.startup()
     yield
@@ -54,10 +55,26 @@ async def trace(request: Request, call_next):
 async def handle_search_error(request: Request, exc: SearchError) -> JSONResponse:
     request_id = getattr(request.state, "request_id", None)
     error_logger.warning("[%s] %s: %s", request_id, type(exc).__name__, exc)
+    logger.debug(
+        "[%s] raised from %s",
+        request_id,
+        " <- ".join(type(cause).__name__ for cause in _causes(exc)),
+        exc_info=settings.log_llm_payloads,
+    )
     return JSONResponse(
         status_code=exc.status_code,
         content={"error": type(exc).__name__, "message": str(exc), "request_id": request_id},
     )
+
+
+def _causes(exc: BaseException) -> list[BaseException]:
+    """The exception chain, outermost first."""
+    chain: list[BaseException] = []
+    current: BaseException | None = exc
+    while current is not None:
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+    return chain
 
 
 @app.exception_handler(Exception)
@@ -108,6 +125,4 @@ async def schema(refresh: bool = Query(default=False)) -> SchemaGraph:
 
 @app.post("/api/v1/search", response_model=SearchResponse)
 async def search(payload: SearchRequest, request: Request) -> SearchResponse:
-    # Failures are logged once, here, by the handlers above, which already carry
-    # the request id and the exception type.
     return await service.search(payload.query, getattr(request.state, "request_id", None))

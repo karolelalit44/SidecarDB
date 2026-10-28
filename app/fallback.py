@@ -1,10 +1,31 @@
 from .config import settings
 from .constants import SIMILARITY_ALIAS, VECTOR_CAST
 from .embeddings import EmbeddingError, embedder
+from .guard import quote, vector_literal
 from .logging_config import get_logger
 from .types import SchemaGraph
 
 logger = get_logger("fallback")
+
+COSINE_DISTANCE = "<=>"
+_reported_mismatch: set[str] = set()
+
+
+def _compatible(graph: SchemaGraph, table: str, width: int) -> bool:
+    """Check if table vector dimensions match query vector width."""
+    declared = graph.embedding_dimensions_for(table)
+    if declared is None or declared == width:
+        return True
+    if table not in _reported_mismatch:
+        _reported_mismatch.add(table)
+        logger.warning(
+            "Vector fallback skipped for %s: the column is declared vector(%d) but the "
+            "configured model produces %d dimensions. Re-embed the column to enable it.",
+            table,
+            declared,
+            width,
+        )
+    return False
 
 
 def available(graph: SchemaGraph, tables) -> bool:
@@ -27,31 +48,29 @@ async def search(graph: SchemaGraph, tables, question: str) -> list[dict]:
         column = graph.embedding_column_for(table)
         if not column:
             continue
+        if not _compatible(graph, table, len(vector)):
+            continue
         try:
-            rows = await _query(table, column, vector)
+            rows = await _query(graph, table, column, vector)
         except Exception as exc:
-            # The fallback is an optional tail to a query that already ran. If it
-            # cannot run, the caller gets no rows rather than a failed request.
             logger.warning("Vector fallback query failed for %s: %s", table, exc)
             continue
         if rows:
             logger.info("Vector fallback matched %d rows in %s", len(rows), table)
-            return [_strip(row, column) for row in rows]
+            return rows
     return []
 
 
-async def _query(table: str, column: str, vector) -> list[dict]:
+async def _query(graph: SchemaGraph, table: str, column: str, vector) -> list[dict]:
     from . import execute
-    from .guard import vector_literal
 
-    literal = vector_literal(vector)
+    payload = [quote(name) for name in graph.tables[table].column_names if name != column]
+
     sql = (
-        f'SELECT *, "{column}" <=> {literal}{VECTOR_CAST} AS {SIMILARITY_ALIAS} '
-        f'FROM "{table}" ORDER BY "{column}" <=> {literal}{VECTOR_CAST} '
+        f"SELECT {', '.join(payload) if payload else '*'}, "
+        f'"{column}" {COSINE_DISTANCE} $1{VECTOR_CAST} AS {SIMILARITY_ALIAS} '
+        f'FROM "{table}" '
+        f'ORDER BY "{column}" {COSINE_DISTANCE} $1{VECTOR_CAST} '
         f"LIMIT {settings.fallback_top_k}"
     )
-    return await execute.run(execute.prepare(sql, None))
-
-
-def _strip(record: dict, column: str) -> dict:
-    return {k: v for k, v in record.items() if k not in (column, SIMILARITY_ALIAS)}
+    return await execute.run(execute.prepare(sql, graph), vector_literal(vector))

@@ -158,6 +158,69 @@ def test_join_keys_are_not_added_without_joins(ecommerce):
     assert with_join_keys(plan, ecommerce).projection == ["grand_total"]
 
 
+def test_a_column_listed_as_a_related_table_is_dropped(ecommerce):
+    """Models write table.column into related_tables; that is not a join."""
+    from app.graph import normalise_plan
+
+    plan = QueryPlan(
+        intent=QueryIntent.retrieve,
+        table="orders",
+        related_tables=["orders.customers", "customers"],
+    )
+    assert normalise_plan(plan, ecommerce).related_tables == ["customers"]
+
+
+def test_the_base_table_is_dropped_from_related_tables(ecommerce):
+    from app.graph import normalise_plan
+
+    plan = QueryPlan(intent=QueryIntent.retrieve, table="orders", related_tables=["orders"])
+    assert normalise_plan(plan, ecommerce).related_tables == []
+
+
+def test_an_unknown_related_table_is_dropped_not_joined(ecommerce):
+    """Dropping narrows the query; joining something unknown would widen it."""
+    from app.graph import normalise_plan
+
+    plan = QueryPlan(intent=QueryIntent.retrieve, table="orders", related_tables=["ghost"])
+    fixed = normalise_plan(plan, ecommerce)
+    assert fixed.related_tables == []
+    assert check_plan(fixed, ecommerce) is None
+
+
+def test_a_reachable_but_not_directly_joinable_table_is_dropped(ecommerce):
+    """customers reaches products in two hops, which the renderer cannot express."""
+    from app.graph import normalise_plan
+
+    plan = QueryPlan(intent=QueryIntent.retrieve, table="customers", related_tables=["products"])
+    assert normalise_plan(plan, ecommerce).related_tables == []
+
+
+def test_a_measure_outside_an_aggregate_is_cleared(ecommerce):
+    from app.graph import normalise_plan
+
+    plan = QueryPlan(
+        intent=QueryIntent.retrieve,
+        table="orders",
+        measure_column="grand_total",
+        measure_function=MeasureFunction.sum,
+    )
+    fixed = normalise_plan(plan, ecommerce)
+    assert fixed.measure_column is None
+    assert fixed.measure_function is None
+
+
+def test_a_measure_on_an_aggregate_is_kept(ecommerce):
+    from app.graph import normalise_plan
+
+    plan = QueryPlan(
+        intent=QueryIntent.aggregate,
+        table="orders",
+        measure_column="grand_total",
+        measure_function=MeasureFunction.sum,
+    )
+    assert normalise_plan(plan, ecommerce).measure_column == "grand_total"
+
+
 def test_join_keys_are_not_added_to_a_distinct_projection(ecommerce):
     """Adding keys to DISTINCT would make the uniqueness collapse."""
     from app.graph import with_join_keys

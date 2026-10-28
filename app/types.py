@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from functools import cached_property
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .constants import TYPE_CATEGORY_NUMERIC, TYPE_CATEGORY_STRING, TYPE_CATEGORY_UNKNOWN
 
@@ -25,6 +25,14 @@ class MeasureFunction(StrEnum):
     avg = "avg"
     min = "min"
     max = "max"
+    # Counts rows rather than reading a column, so it is the one measure that
+    # needs no measure_column. Without it "count X grouped by Y" has no plan.
+    count = "count"
+
+    @property
+    def needs_column(self) -> bool:
+        """Whether the measure reads a column."""
+        return self is not MeasureFunction.count
 
 
 class ForeignKeyInfo(BaseModel):
@@ -42,13 +50,10 @@ class IndexedColumn(BaseModel):
 
 
 class Hit(BaseModel):
-    """One catalog element's score for the incoming question.
-
-    Only the owning table and the score are carried: schema linking resolves a
-    question to tables, and nothing downstream reads the individual element.
-    """
+    """One catalog element's score for the incoming question."""
 
     table: str
+    subject: str
     score: float
 
 
@@ -69,6 +74,27 @@ class QueryPlan(BaseModel):
     text_search_query: str | None = None
     template: str | None = Field(default=None, max_length=200)
 
+    @field_validator(
+        "related_tables", "projection", "group_by", "text_search_columns", mode="before"
+    )
+    @classmethod
+    def _coerce_list(cls, value: object) -> object:
+        """Coerce string, null, or list input to a list of strings."""
+        if value is None:
+            return []
+        if isinstance(value, str):
+            if not value.strip():
+                return []
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("order_by", mode="before")
+    @classmethod
+    def _coerce_order_by(cls, value: object) -> object:
+        if isinstance(value, list):
+            return str(value[0]) if value else None
+        return value
+
     @property
     def tables(self) -> list[str]:
         return [self.table, *self.related_tables]
@@ -82,6 +108,7 @@ class ColumnInfo(BaseModel):
     primary_key: bool = False
     description: str | None = None
     distinct_estimate: float = 0.0
+    dimensions: int | None = None
 
     @property
     def is_numeric(self) -> bool:
@@ -125,16 +152,20 @@ class SchemaGraph(BaseModel):
 
     @cached_property
     def foreign_keys(self) -> list[ForeignKeyInfo]:
-        """Flattened once per catalog.
-
-        Read inside the join-path search and the renderer, both of which scan it
-        repeatedly; rebuilding the list on each read dominated those loops.
-        """
+        """All foreign keys in the schema graph."""
         return [fk for t in self.tables.values() for fk in t.foreign_keys]
 
     def embedding_column_for(self, table: str) -> str | None:
         info = self.tables.get(table)
         return info.embedding_column if info else None
+
+    def embedding_dimensions_for(self, table: str) -> int | None:
+        """Declared width of the table's vector column, or None if unconstrained."""
+        info = self.tables.get(table)
+        if info is None or not info.embedding_column:
+            return None
+        column = next((c for c in info.columns if c.name == info.embedding_column), None)
+        return column.dimensions if column else None
 
     def describe(self, tables: list[str] | None = None, max_columns: int = 0) -> str:
         selected = (
@@ -178,10 +209,6 @@ class SchemaGraph(BaseModel):
 
         return "\n".join(lines).strip()
 
-
-# The HTTP contract models live in .schema, which imports RetrievalMode from here.
-# They are deliberately not re-exported: re-exporting them closed an import cycle
-# and nothing imported them from this module anyway.
 
 __all__ = [
     "ColumnInfo",

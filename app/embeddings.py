@@ -84,12 +84,7 @@ class Embedder:
 
 
 def dot(a, b) -> float:
-    """Cosine similarity between two encoded texts.
-
-    The encoder is configured with normalize_embeddings=True, so both operands are
-    already unit vectors and cosine similarity is exactly their dot product. The
-    norms therefore need not be recomputed for every pair on every question.
-    """
+    """Both operands are unit vectors, so cosine is the dot product."""
     return sum(x * y for x, y in zip(a, b, strict=True))
 
 
