@@ -3,10 +3,10 @@ import logging
 import sys
 from typing import TYPE_CHECKING
 
-from .constants import COLOURS, DIM, NAMESPACE, RESET
+from core.constants import COLOURS, DIM, NAMESPACE, RESET
 
 if TYPE_CHECKING:
-    from .config import Settings
+    from core.config import Settings
 
 
 class ColouredFormatter(logging.Formatter):
@@ -40,7 +40,7 @@ class JsonFormatter(logging.Formatter):
 
 
 class NamespaceFilter(logging.Filter):
-    """Applies one level to sidecardb records and another to everything else."""
+    """Applies one level to askdb records and another to everything else."""
 
     def __init__(self, namespace: str, app_level: int, dependency_level: int) -> None:
         super().__init__()
@@ -58,7 +58,7 @@ class NamespaceFilter(logging.Filter):
 
 
 def get_logger(name: str) -> logging.Logger:
-    """A logger under the sidecardb namespace; safe to call at import time."""
+    """A logger under the askdb namespace; safe to call at import time."""
     return logging.getLogger(f"{NAMESPACE}.{name}")
 
 
@@ -79,9 +79,9 @@ def _formatter(settings: "Settings") -> logging.Formatter:
 
 
 def configure_logging(settings: "Settings") -> logging.Logger:
-    """Attach one handler to the sidecardb logger.
+    """Attach one handler to the askdb logger.
 
-    The root logger is never touched: when sidecardb runs inside a host
+    The root logger is never touched: when askdb runs inside a host
     application, that application owns its own logging. The CLI and Docker
     entrypoint call this to get the standalone service's output.
     """

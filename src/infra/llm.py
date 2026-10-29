@@ -7,7 +7,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
-from .constants import (
+from core.constants import (
     COMPLETION_TOKENS_FIELD,
     FENCE,
     FINISH_REASON_FIELD,
@@ -23,11 +23,11 @@ from .constants import (
     TRUNCATION_MARK,
     USAGE_FIELD,
 )
-from .exceptions import ConfigurationError, PlanningError, ProviderError
-from .logging_config import get_logger
+from core.exceptions import ConfigurationError, PlanningError, ProviderError
+from core.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from .config import Settings
+    from core.config import Settings
 
 logger = get_logger("llm")
 

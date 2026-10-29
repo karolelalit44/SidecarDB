@@ -2,17 +2,17 @@
 
 import pytest
 
-from sidecardb.exceptions import (
+from core.exceptions import (
     ConfigurationError,
     ExecutionError,
     PlanningError,
     ProviderError,
     QueryError,
 )
-from sidecardb.graph import link, plan
-from sidecardb.retrieval import SchemaIndex
-from sidecardb.service import SearchService
-from sidecardb.types import MeasureFunction, QueryIntent, QueryPlan, RetrievalMode
+from core.graph import link, plan
+from core.retrieval import SchemaIndex
+from core.service import SearchService
+from core.types import MeasureFunction, QueryIntent, QueryPlan, RetrievalMode
 from tests.conftest import FakeDatabase, FakeEmbedder
 
 

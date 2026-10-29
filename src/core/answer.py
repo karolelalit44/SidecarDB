@@ -1,5 +1,5 @@
-from .logging_config import get_logger
-from .types import QueryIntent
+from core.logging_config import get_logger
+from core.types import QueryIntent
 
 logger = get_logger("answer")
 

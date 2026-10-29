@@ -3,8 +3,8 @@ import contextlib
 import time
 from typing import TYPE_CHECKING, Any
 
-from .config import Settings
-from .constants import (
+from core.config import Settings
+from core.constants import (
     BACKOFF_FACTOR,
     DATABASE_DOWN,
     DATABASE_UP,
@@ -13,13 +13,13 @@ from .constants import (
     STATUS_DEGRADED,
     STATUS_OK,
 )
-from .db import Database
-from .embeddings import Embedder
-from .logging_config import get_logger
-from .schema import HealthResponse, SearchResponse
-from .service import SearchService
-from .types import SchemaGraph
-from .verification import StartupVerificationService
+from core.logging_config import get_logger
+from core.schema import HealthResponse, SearchResponse
+from core.service import SearchService
+from core.types import SchemaGraph
+from core.verification import StartupVerificationService
+from infra.db import Database
+from infra.embeddings import Embedder
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
@@ -31,17 +31,17 @@ def _detect_version() -> str:
     from importlib.metadata import PackageNotFoundError, version
 
     try:
-        return version("sidecardb")
+        return version("askdb")
     except PackageNotFoundError:
         return "0+local"
 
 
-class SidecarDB:
+class AskDB:
     """A natural-language search engine over one PostgreSQL schema.
 
     The whole configuration is two required values; construct, start, ask::
 
-        async with SidecarDB(database_url="postgresql://...", llm_api_key="sk-...") as db:
+        async with AskDB(database_url="postgresql://...", llm_api_key="sk-...") as db:
             answer = await db.search("how many open cases were filed this week?")
 
     Nothing is imported from the environment implicitly unless you want it to
@@ -122,7 +122,7 @@ class SidecarDB:
             self._started = False
         logger.debug("client: stopped")
 
-    async def __aenter__(self) -> "SidecarDB":
+    async def __aenter__(self) -> "AskDB":
         await self.start()
         return self
 
@@ -184,6 +184,6 @@ class SidecarDB:
 
     def create_app(self) -> "FastAPI":
         """Build the FastAPI service around this instance."""
-        from .server import create_app
+        from core.server import create_app
 
         return create_app(self)

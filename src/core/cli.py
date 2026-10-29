@@ -1,7 +1,7 @@
 import argparse
 from collections.abc import Sequence
 
-from .logging_config import get_logger
+from core.logging_config import get_logger
 
 logger = get_logger("cli")
 
@@ -10,7 +10,7 @@ __all__ = ["build_parser", "main"]
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="sidecardb",
+        prog="askdb",
         description="Natural-language search over a PostgreSQL schema.",
     )
     subparsers = parser.add_subparsers(dest="command")
@@ -26,14 +26,14 @@ def build_parser() -> argparse.ArgumentParser:
 def serve(host: str | None, port: int | None, env_file: str | None) -> None:
     import uvicorn
 
-    from .client import SidecarDB
-    from .server import create_app
+    from core.client import AskDB
+    from core.server import create_app
 
     # Passing _env_file=None would disable the default .env discovery; only
     # forward the keyword when --env-file was actually given.
-    sidecar = SidecarDB(_env_file=env_file) if env_file else SidecarDB()
-    settings = sidecar.settings
-    app = create_app(sidecar)
+    askdb = AskDB(_env_file=env_file) if env_file else AskDB()
+    settings = askdb.settings
+    app = create_app(askdb)
     uvicorn.run(
         app,
         host=host if host is not None else settings.host,

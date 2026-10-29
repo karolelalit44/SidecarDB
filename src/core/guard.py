@@ -1,8 +1,8 @@
 import sqlglot
 from sqlglot import exp
 
-from .config import Settings
-from .constants import (
+from core.config import Settings
+from core.constants import (
     ANONYMOUS,
     BLOCKED_NODES,
     DIALECT,
@@ -11,9 +11,9 @@ from .constants import (
     PG_IDENTIFIER_MAX_LENGTH,
     ROOT_TYPE,
 )
-from .exceptions import SecurityError
-from .logging_config import get_logger
-from .types import SchemaGraph
+from core.exceptions import SecurityError
+from core.logging_config import get_logger
+from core.types import SchemaGraph
 
 logger = get_logger("guard")
 

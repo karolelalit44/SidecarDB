@@ -58,10 +58,10 @@ LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 LogFormat = Literal["text", "json"]
 LogColour = Literal["auto", "on", "off"]
 
-# The namespace every sidecardb logger lives under. Attaching handlers to this
+# The namespace every askdb logger lives under. Attaching handlers to this
 # logger (and only this logger) is what keeps the library from touching a host
 # application's logging configuration.
-NAMESPACE = "sidecardb"
+NAMESPACE = "askdb"
 
 # PostgreSQL identifiers are capped at NAMEDATALEN - 1 characters.
 PG_IDENTIFIER_MAX_LENGTH = 63

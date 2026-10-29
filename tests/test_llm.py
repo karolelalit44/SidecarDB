@@ -1,7 +1,7 @@
 import pytest
 
-from sidecardb.exceptions import PlanningError
-from sidecardb.llm import extract_json
+from core.exceptions import PlanningError
+from infra.llm import extract_json
 
 
 def test_plain_object():

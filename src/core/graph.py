@@ -3,9 +3,8 @@ from typing import TYPE_CHECKING, NamedTuple
 
 from pydantic import ValidationError
 
-from . import render
-from .config import Settings
-from .constants import (
+from core.config import Settings
+from core.constants import (
     COMPARISON_OPERATORS,
     COUNT_ALIAS,
     DEFAULT_COMPARISON,
@@ -14,15 +13,17 @@ from .constants import (
     OPERATORS,
     PATTERN_OPERATORS,
 )
-from .exceptions import ConfigurationError, ExecutionError, PlanningError, ProviderError
-from .llm import prompt_chars, trim
-from .logging_config import get_logger
-from .types import MeasureFunction, QueryIntent, QueryPlan, RetrievalMode, SchemaGraph
+from core.exceptions import ConfigurationError, ExecutionError, PlanningError, ProviderError
+from core.logging_config import get_logger
+from core.types import MeasureFunction, QueryIntent, QueryPlan, RetrievalMode, SchemaGraph
+from infra.llm import prompt_chars, trim
+
+from . import render
 
 if TYPE_CHECKING:
-    from .execute import Executor
-    from .llm import LLMClient
-    from .retrieval import SchemaIndex
+    from core.retrieval import SchemaIndex
+    from infra.execute import Executor
+    from infra.llm import LLMClient
 
 logger = get_logger("graph")
 

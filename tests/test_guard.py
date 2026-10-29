@@ -1,8 +1,8 @@
 import pytest
 
-from sidecardb import guard
-from sidecardb.exceptions import SecurityError
-from sidecardb.types import SchemaGraph
+from core import guard
+from core.exceptions import SecurityError
+from core.types import SchemaGraph
 
 
 def test_select_passes(ecommerce: SchemaGraph, settings):

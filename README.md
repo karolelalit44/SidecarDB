@@ -1,8 +1,8 @@
-# sidecardb
+# askdb
 
 **Ask a PostgreSQL database a question in plain English and get the rows back — safely.**
 
-`sidecardb` is a plug-and-play natural-language search engine for PostgreSQL. It introspects your
+`askdb` is a plug-and-play natural-language search engine for PostgreSQL. It introspects your
 schema at runtime, lets a language model *plan* a query as a constrained JSON object (never raw
 SQL), validates that plan against an AST guard and your live catalog, executes it inside a
 read-only sandbox with bound parameters, and returns the rows with a plain-English answer.
@@ -17,17 +17,17 @@ question → schema retrieval → LLM planner (JSON plan) → AST guard → sand
 ## Install
 
 ```bash
-pip install sidecardb
+pip install askdb
 # optional: local embedding models (pulls torch, several GB)
-pip install 'sidecardb[embeddings]'
+pip install 'askdb[embeddings]'
 ```
 
 ## Use it as a library
 
 ```python
-from sidecardb import SidecarDB
+from core import AskDB
 
-async with SidecarDB(
+async with AskDB(
     database_url="postgresql://reader@localhost:5432/sales",
     llm_api_key="sk-...",
 ) as db:
@@ -45,8 +45,8 @@ optional `.env` file, exactly like pydantic-settings.
 ```bash
 export DATABASE_URL=postgresql://reader@localhost:5432/sales
 export LLM_API_KEY=sk-...
-sidecardb serve --port 8000
-# or: uvicorn 'sidecardb.server:create_app' --factory
+askdb serve --port 8000
+# or: uvicorn 'core.server:create_app' --factory
 ```
 
 | Method | Path                       | Purpose                                   |

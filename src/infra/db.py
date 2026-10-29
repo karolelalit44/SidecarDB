@@ -1,11 +1,11 @@
 import asyncio
 import time
 
-from .config import Settings
-from .constants import BACKOFF_FACTOR, MS_PER_SECOND
-from .exceptions import ConfigurationError, SchemaError
-from .logging_config import get_logger
-from .types import SchemaGraph, TableInfo
+from core.config import Settings
+from core.constants import BACKOFF_FACTOR, MS_PER_SECOND
+from core.exceptions import ConfigurationError, SchemaError
+from core.logging_config import get_logger
+from core.types import SchemaGraph, TableInfo
 
 logger = get_logger("db")
 

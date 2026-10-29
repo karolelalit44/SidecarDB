@@ -6,9 +6,9 @@ import pytest
 from pydantic import ValidationError
 from pydantic.fields import PydanticUndefined
 
-from sidecardb.config import Settings
-from sidecardb.constants import COLOURS, NAMESPACE
-from sidecardb.logging_config import (
+from core.config import Settings
+from core.constants import COLOURS, NAMESPACE
+from core.logging_config import (
     ColouredFormatter,
     JsonFormatter,
     NamespaceFilter,
@@ -68,9 +68,9 @@ def test_example_env_leaves_only_optional_values_blank():
     }
 
 
-def test_app_name_defaults_to_sidecardb():
+def test_app_name_defaults_to_askdb():
     settings = Settings(_env_file=None, database_url="postgresql://x/x", llm_api_key="k")
-    assert settings.app_name == "sidecardb"
+    assert settings.app_name == "askdb"
 
 
 def test_expose_sql_is_off_by_default():
@@ -129,25 +129,25 @@ def record(name: str, level: int) -> logging.LogRecord:
     return logging.LogRecord(name, level, "f", 1, "m", None, None)
 
 
-def test_configure_attaches_one_handler_to_the_sidecarb_logger_only():
+def test_configure_attaches_one_handler_to_the_askdb_logger_only():
     """The library must never clear a host application's root handlers."""
     root = logging.getLogger()
-    sidecar = logging.getLogger(NAMESPACE)
+    askdb = logging.getLogger(NAMESPACE)
     previous_root_level, previous_root_handlers = root.level, list(root.handlers)
-    previous_sidecar_level, previous_sidecar_handlers = sidecar.level, list(sidecar.handlers)
+    previous_askdb_level, previous_askdb_handlers = askdb.level, list(askdb.handlers)
     try:
         settings = Settings(_env_file=None, database_url="postgresql://x/x", llm_api_key="k")
         configure_logging(settings)
         configure_logging(settings)
-        assert len(sidecar.handlers) == 1
-        assert sidecar.propagate is False
+        assert len(askdb.handlers) == 1
+        assert askdb.propagate is False
         assert root.handlers == previous_root_handlers
         assert root.level == previous_root_level
     finally:
         root.setLevel(previous_root_level)
         root.handlers[:] = previous_root_handlers
-        sidecar.setLevel(previous_sidecar_level)
-        sidecar.handlers[:] = previous_sidecar_handlers
+        askdb.setLevel(previous_askdb_level)
+        askdb.handlers[:] = previous_askdb_handlers
 
 
 def test_get_logger_prefixes_the_namespace():

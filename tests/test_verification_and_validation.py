@@ -3,12 +3,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from sidecardb import SidecarDB
-from sidecardb.config import Settings
-from sidecardb.exceptions import ConfigurationError
-from sidecardb.server import create_app
-from sidecardb.service import validate_query
-from sidecardb.verification import StartupVerificationService
+from core import AskDB
+from core.config import Settings
+from core.exceptions import ConfigurationError
+from core.server import create_app
+from core.service import validate_query
+from core.verification import StartupVerificationService
 
 
 def test_validate_query_permits_natural_language():
@@ -71,7 +71,7 @@ def test_verification_service_fails_when_the_url_is_missing():
 def test_verification_service_never_touches_the_database():
     """Verification reads configuration; the connection belongs elsewhere."""
     verifier = StartupVerificationService(offline_settings())
-    with patch("sidecardb.db.Database.connect", new_callable=AsyncMock) as connect:
+    with patch("infra.db.Database.connect", new_callable=AsyncMock) as connect:
         verifier.verify()
     connect.assert_not_called()
 
@@ -88,7 +88,7 @@ def test_verification_service_embeddings_off_does_not_raise():
 
 
 def client_for(settings: Settings) -> TestClient:
-    return TestClient(create_app(SidecarDB(settings=settings)), raise_server_exceptions=False)
+    return TestClient(create_app(AskDB(settings=settings)), raise_server_exceptions=False)
 
 
 def test_search_endpoint_handles_query_error():

@@ -9,7 +9,7 @@ from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .constants import (
+from core.constants import (
     API_KEY_HEADER,
     AUTHORIZATION_HEADER,
     BEARER_PREFIX,
@@ -17,13 +17,13 @@ from .constants import (
     REQUEST_ID_MAX_LENGTH,
     RETRY_AFTER_HEADER,
 )
-from .exceptions import SearchError
-from .logging_config import configure_logging, get_logger
-from .schema import HealthResponse, SearchRequest, SearchResponse
-from .types import SchemaGraph
+from core.exceptions import SearchError
+from core.logging_config import configure_logging, get_logger
+from core.schema import HealthResponse, SearchRequest, SearchResponse
+from core.types import SchemaGraph
 
 if TYPE_CHECKING:
-    from .client import SidecarDB
+    from core.client import AskDB
 
 logger = get_logger("api")
 error_logger = get_logger("error")
@@ -79,37 +79,37 @@ def _key_accepted(presented: str, accepted: list[str]) -> bool:
     return any(secrets.compare_digest(presented, candidate) for candidate in accepted)
 
 
-def create_app(sidecar: "SidecarDB | None" = None) -> FastAPI:
-    """Build the HTTP service around a SidecarDB instance.
+def create_app(askdb: "AskDB | None" = None) -> FastAPI:
+    """Build the HTTP service around a AskDB instance.
 
     With no argument the instance is built from the environment, so this is
-    also a valid uvicorn factory: ``uvicorn sidecardb.server:create_app
+    also a valid uvicorn factory: ``uvicorn core.server:create_app
     --factory``.
     """
-    from .client import SidecarDB as _SidecarDB
+    from core.client import AskDB as _AskDB
 
-    sidecar = sidecar if sidecar is not None else _SidecarDB()
-    settings = sidecar.settings
+    askdb = askdb if askdb is not None else _AskDB()
+    settings = askdb.settings
     configure_logging(settings)
     limiter = RateLimiter(settings.rate_limit_requests, settings.rate_limit_window_seconds)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         logger.debug("lifespan: startup begins")
-        await sidecar.start(require_database=False)
+        await askdb.start(require_database=False)
         logger.debug("lifespan: startup complete")
         yield
         logger.debug("lifespan: shutdown begins")
-        await sidecar.stop()
+        await askdb.stop()
         logger.debug("lifespan: shutdown complete")
 
     app = FastAPI(
         title=settings.app_name,
-        version=sidecar.version,
+        version=askdb.version,
         lifespan=lifespan,
         description="Natural-language search over a PostgreSQL schema.",
     )
-    app.state.sidecar = sidecar
+    app.state.askdb = askdb
 
     @app.middleware("http")
     async def edge(request: Request, call_next):
@@ -220,7 +220,7 @@ def create_app(sidecar: "SidecarDB | None" = None) -> FastAPI:
     @app.get("/health", response_model=HealthResponse)
     async def health() -> "HealthResponse | JSONResponse":
         """Liveness: pings the database (cached for a moment), never runs a query."""
-        result = await sidecar.health()
+        result = await askdb.health()
         if result.status != "ok":
             # 503 so container orchestrators and load balancers see the truth.
             return JSONResponse(status_code=503, content=result.model_dump())
@@ -230,9 +230,9 @@ def create_app(sidecar: "SidecarDB | None" = None) -> FastAPI:
     async def schema(refresh: bool = Query(default=False)) -> SchemaGraph:
         logger.debug("schema: refresh=%s", refresh)
         if refresh:
-            graph = await sidecar.refresh()
+            graph = await askdb.refresh()
         else:
-            graph = await sidecar.schema()
+            graph = await askdb.schema()
         logger.debug(
             "schema: returning %d tables and %d columns",
             len(graph.tables),
@@ -244,7 +244,7 @@ def create_app(sidecar: "SidecarDB | None" = None) -> FastAPI:
     async def search(payload: SearchRequest, request: Request) -> SearchResponse:
         request_id = getattr(request.state, "request_id", None)
         logger.debug("[%s] search accepted: %r", request_id, payload.query)
-        result = await sidecar.search(payload.query, request_id)
+        result = await askdb.search(payload.query, request_id)
         logger.debug(
             "[%s] search answered: rows=%d elapsed=%s ms",
             request_id,

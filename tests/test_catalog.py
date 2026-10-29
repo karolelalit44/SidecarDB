@@ -1,7 +1,7 @@
 import pytest
 
-from sidecardb import retrieval
-from sidecardb.types import SchemaGraph
+from core import retrieval
+from core.types import SchemaGraph
 
 from .conftest import FakeEmbedder
 
@@ -45,7 +45,7 @@ async def test_index_builds_documents_for_every_column(ecommerce: SchemaGraph, s
 
 
 def test_type_categories_drive_column_classification():
-    from sidecardb.types import ColumnInfo
+    from core.types import ColumnInfo
 
     numeric = ColumnInfo(name="x", data_type="integer", type_category="N")
     other = ColumnInfo(name="z", data_type="date", type_category="D")
@@ -70,7 +70,7 @@ async def test_index_build_is_idempotent(ecommerce: SchemaGraph, settings):
 
 async def test_scoring_uses_the_dot_product_of_normalised_vectors(ecommerce, settings):
     """Both operands are unit vectors, so the score is the plain dot product."""
-    from sidecardb.retrieval import dot
+    from core.retrieval import dot
 
     a = [1.0, 0.0, 0.0]
     b = [0.6, 0.8, 0.0]

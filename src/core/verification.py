@@ -1,9 +1,9 @@
 from pathlib import Path
 
-from .config import Settings
-from .constants import PROVIDER_LOCAL, PROVIDER_NONE
-from .exceptions import ConfigurationError
-from .logging_config import get_logger
+from core.config import Settings
+from core.constants import PROVIDER_LOCAL, PROVIDER_NONE
+from core.exceptions import ConfigurationError
+from core.logging_config import get_logger
 
 logger = get_logger("verification")
 

@@ -3,7 +3,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field, field_validator
 
-from .constants import TYPE_CATEGORY_NUMERIC, TYPE_CATEGORY_UNKNOWN
+from core.constants import TYPE_CATEGORY_NUMERIC, TYPE_CATEGORY_UNKNOWN
 
 
 class RetrievalMode(StrEnum):

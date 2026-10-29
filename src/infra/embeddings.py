@@ -6,10 +6,10 @@ from pathlib import Path
 
 import httpx
 
-from .config import Settings
-from .constants import AUTHORIZATION_HEADER, BEARER_PREFIX, PROVIDER_API, PROVIDER_LOCAL
-from .exceptions import ConfigurationError, EmbeddingError
-from .logging_config import get_logger
+from core.config import Settings
+from core.constants import AUTHORIZATION_HEADER, BEARER_PREFIX, PROVIDER_API, PROVIDER_LOCAL
+from core.exceptions import ConfigurationError, EmbeddingError
+from core.logging_config import get_logger
 
 logger = get_logger("embeddings")
 _backend_lock = threading.Lock()
@@ -61,7 +61,7 @@ class _ApiBackend:
 
 
 class _LocalBackend:
-    """Runs a sentence-transformers model in-process (sidecardb[embeddings])."""
+    """Runs a sentence-transformers model in-process (askdb[embeddings])."""
 
     def __init__(self, settings: Settings) -> None:
         try:
@@ -69,7 +69,7 @@ class _LocalBackend:
         except ImportError as exc:  # pragma: no cover - depends on install extra
             raise EmbeddingError(
                 "The local embedding backend needs the embeddings extra: "
-                "pip install 'sidecardb[embeddings]'"
+                "pip install 'askdb[embeddings]'"
             ) from exc
 
         source, is_local = resolve_model_source(settings)

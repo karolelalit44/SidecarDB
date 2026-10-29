@@ -2,20 +2,21 @@ import time
 import unicodedata
 from typing import TYPE_CHECKING
 
+from core.answer import render_template
+from core.config import Settings
+from core.exceptions import QueryError
+from core.logging_config import get_logger
+from core.retrieval import SchemaIndex
+from core.schema import SearchResponse
+from core.types import SchemaGraph
+
 from . import graph as graph_module
-from .answer import render_template
-from .config import Settings
-from .exceptions import QueryError
-from .logging_config import get_logger
-from .retrieval import SchemaIndex
-from .schema import SearchResponse
-from .types import SchemaGraph
 
 if TYPE_CHECKING:
-    from .db import Database
-    from .embeddings import Embedder
-    from .execute import Executor
-    from .llm import LLMClient
+    from infra.db import Database
+    from infra.embeddings import Embedder
+    from infra.execute import Executor
+    from infra.llm import LLMClient
 
 logger = get_logger("service")
 
@@ -57,8 +58,8 @@ class SearchService:
         llm: "LLMClient | None" = None,
         executor: "Executor | None" = None,
     ) -> None:
-        from .execute import Executor as _Executor
-        from .llm import LLMClient as _LLMClient
+        from infra.execute import Executor as _Executor
+        from infra.llm import LLMClient as _LLMClient
 
         self.settings = settings
         self.database = database

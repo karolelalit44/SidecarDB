@@ -1,13 +1,13 @@
 import time
 from typing import TYPE_CHECKING
 
-from .exceptions import EmbeddingError
-from .logging_config import get_logger
-from .types import Hit, SchemaGraph, TableInfo
+from core.exceptions import EmbeddingError
+from core.logging_config import get_logger
+from core.types import Hit, SchemaGraph, TableInfo
 
 if TYPE_CHECKING:
-    from .config import Settings
-    from .embeddings import Embedder
+    from core.config import Settings
+    from infra.embeddings import Embedder
 
 logger = get_logger("retrieval")
 

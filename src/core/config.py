@@ -3,7 +3,7 @@ from typing import Annotated, Any, Literal
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-from .constants import LogColour, LogFormat, LogLevel
+from core.constants import LogColour, LogFormat, LogLevel
 
 CsvList = Annotated[list[str], NoDecode]
 
@@ -29,7 +29,7 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    app_name: str = "sidecardb"
+    app_name: str = "askdb"
 
     # --- logging -----------------------------------------------------------
     log_level: LogLevel = "INFO"
@@ -114,7 +114,7 @@ class Settings(BaseSettings):
     # "api": call an OpenAI-compatible /embeddings endpoint over HTTP (default,
     #        no heavyweight dependencies).
     # "local": run a sentence-transformers model in-process (needs the
-    #        sidecardb[embeddings] extra).
+    #        askdb[embeddings] extra).
     # "none": no retrieval index; every question is planned from catalog order.
     embedding_provider: Literal["api", "local", "none"] = "api"
     embedding_model: str = "text-embedding-3-small"

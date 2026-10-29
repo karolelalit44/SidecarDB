@@ -2,15 +2,15 @@ import asyncio
 import time
 from typing import TYPE_CHECKING
 
-from .constants import MS_PER_SECOND
-from .exceptions import ConfigurationError, ExecutionError, SecurityError
-from .logging_config import get_logger
-from .render import Rendered
+from core.constants import MS_PER_SECOND
+from core.exceptions import ConfigurationError, ExecutionError, SecurityError
+from core.logging_config import get_logger
+from core.render import Rendered
 
 if TYPE_CHECKING:
-    from .config import Settings
-    from .db import Database
-    from .types import SchemaGraph
+    from core.config import Settings
+    from core.types import SchemaGraph
+    from infra.db import Database
 
 logger = get_logger("execute")
 
@@ -23,7 +23,7 @@ class Executor:
         self._settings = settings
 
     def prepare(self, rendered: Rendered, graph: "SchemaGraph") -> str:
-        from .guard import validate
+        from core.guard import validate
 
         return validate(rendered.sql, graph, self._settings)
 

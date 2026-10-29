@@ -3,13 +3,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "sidecardb"
-version = "2.1.0"
+name = "askdb"
+version = "2.2.0"
 description = "Ask a PostgreSQL database a question in plain English and get the rows back."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
-authors = [{ name = "sidecardb contributors" }]
+authors = [{ name = "askdb contributors" }]
 keywords = ["nl2sql", "postgres", "llm", "search", "rag", "natural-language"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -45,17 +45,17 @@ dev = [
 ]
 
 [project.scripts]
-sidecardb = "sidecardb.cli:main"
+askdb = "core.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/karolelalit44/poc-db-nl-search"
 Repository = "https://github.com/karolelalit44/poc-db-nl-search"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/sidecardb"]
+packages = ["src/core", "src/infra"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/sidecardb", "tests", "README.md", "LICENSE", "pyproject.toml"]
+include = ["src", "tests", "README.md", "LICENSE", "pyproject.toml"]
 exclude = ["local"]
 
 [tool.ruff]
@@ -67,7 +67,7 @@ select = ["F", "E", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF", "DTZ", "T20", 
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101"]
-"src/sidecardb/cli.py" = ["T20"]
+"src/core/cli.py" = ["T20"]
 
 [tool.ruff.format]
 quote-style = "double"
@@ -76,7 +76,7 @@ indent-style = "space"
 [tool.mypy]
 python_version = "3.12"
 mypy_path = "src"
-packages = ["sidecardb"]
+packages = ["core", "infra"]
 check_untyped_defs = true
 no_implicit_optional = true
 warn_redundant_casts = true
@@ -84,7 +84,7 @@ warn_unused_ignores = true
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["sidecardb.llm", "sidecardb.db", "sidecardb.embeddings"]
+module = ["infra.llm", "infra.db", "infra.embeddings"]
 disallow_untyped_defs = false
 
 [tool.pytest.ini_options]

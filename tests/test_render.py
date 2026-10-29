@@ -1,9 +1,9 @@
 import pytest
 
-from sidecardb import render
-from sidecardb.exceptions import SecurityError
-from sidecardb.render import like_pattern
-from sidecardb.types import MeasureFunction, QueryIntent, QueryPlan, SchemaGraph
+from core import render
+from core.exceptions import SecurityError
+from core.render import like_pattern
+from core.types import MeasureFunction, QueryIntent, QueryPlan, SchemaGraph
 
 
 def test_count_plan(any_graph: SchemaGraph):
@@ -181,7 +181,7 @@ def test_projection_stays_unqualified(ecommerce: SchemaGraph):
 
 def test_three_part_column_is_normalised(ecommerce: SchemaGraph, settings):
     """Model habit prefixes names; the trailing column wins when the table has it."""
-    from sidecardb.graph import normalise_plan
+    from core.graph import normalise_plan
 
     plan = QueryPlan(
         intent=QueryIntent.retrieve,

@@ -1,8 +1,8 @@
 import pytest
 
-from sidecardb.config import Settings
-from sidecardb.exceptions import EmbeddingError
-from sidecardb.types import ColumnInfo, SchemaGraph, TableInfo
+from core.config import Settings
+from core.exceptions import EmbeddingError
+from core.types import ColumnInfo, SchemaGraph, TableInfo
 
 CATEGORY = {
     "uuid": "U",

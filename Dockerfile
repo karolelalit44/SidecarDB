@@ -18,11 +18,11 @@ FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-RUN useradd --create-home --uid 10001 sidecar
+RUN useradd --create-home --uid 10001 askdb
 
 COPY --from=build /install /usr/local
 
-USER sidecar
+USER askdb
 WORKDIR /app
 
 EXPOSE 8000
@@ -30,4 +30,4 @@ EXPOSE 8000
 HEALTHCHECK --interval=10s --timeout=5s --retries=5 \
     CMD ["python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=4).status == 200 else 1)"]
 
-CMD ["sidecardb", "serve"]
+CMD ["askdb", "serve"]

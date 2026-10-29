@@ -1,22 +1,22 @@
-"""sidecardb: natural-language search over a PostgreSQL schema.
+"""askdb: natural-language search over a PostgreSQL schema.
 
 Library::
 
-    from sidecardb import SidecarDB
+    from core import AskDB
 
-    async with SidecarDB(database_url="postgresql://...", llm_api_key="sk-...") as db:
+    async with AskDB(database_url="postgresql://...", llm_api_key="sk-...") as db:
         answer = await db.search("how many open cases were filed this week?")
 
 Service::
 
-    sidecardb serve --host 0.0.0.0 --port 8000
+    askdb serve --host 0.0.0.0 --port 8000
 """
 
 from typing import TYPE_CHECKING, Any
 
-from .client import SidecarDB, _detect_version
-from .config import Settings, get_settings
-from .exceptions import (
+from core.client import AskDB, _detect_version
+from core.config import Settings, get_settings
+from core.exceptions import (
     ConfigurationError,
     EmbeddingError,
     ExecutionError,
@@ -27,8 +27,8 @@ from .exceptions import (
     SearchError,
     SecurityError,
 )
-from .schema import HealthResponse, SearchRequest, SearchResponse
-from .types import MeasureFunction, QueryIntent, QueryPlan, RetrievalMode, SchemaGraph
+from core.schema import HealthResponse, SearchRequest, SearchResponse
+from core.types import MeasureFunction, QueryIntent, QueryPlan, RetrievalMode, SchemaGraph
 
 __version__ = _detect_version()
 
@@ -36,17 +36,18 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
 
 
-def create_app(sidecar: SidecarDB | None = None, **overrides: Any) -> "FastAPI":
+def create_app(askdb: AskDB | None = None, **overrides: Any) -> "FastAPI":
     """Build the FastAPI service; with no instance, configuration comes from
     the environment. Also usable as a uvicorn factory."""
-    from .server import create_app as _create_app
+    from core.server import create_app as _create_app
 
-    if sidecar is None and overrides:
-        sidecar = SidecarDB(**overrides)
-    return _create_app(sidecar)
+    if askdb is None and overrides:
+        askdb = AskDB(**overrides)
+    return _create_app(askdb)
 
 
 __all__ = [
+    "AskDB",
     "ConfigurationError",
     "EmbeddingError",
     "ExecutionError",
@@ -65,7 +66,6 @@ __all__ = [
     "SearchResponse",
     "SecurityError",
     "Settings",
-    "SidecarDB",
     "__version__",
     "create_app",
     "get_settings",

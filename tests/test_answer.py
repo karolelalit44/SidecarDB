@@ -1,7 +1,7 @@
 """The answer layer: template binding."""
 
-from sidecardb.answer import SCALAR_INTENTS, render_template
-from sidecardb.types import QueryIntent
+from core.answer import SCALAR_INTENTS, render_template
+from core.types import QueryIntent
 
 COUNT_ROWS = [{"record_count": 3}]
 FETCH_ROWS = [{"order_reference": "R-1"}, {"order_reference": "R-2"}]
@@ -93,13 +93,13 @@ def test_scalar_intents_are_exactly_the_ones_that_collapse_to_one_number():
 
 
 def test_prompt_documents_every_placeholder_the_engine_binds():
-    from sidecardb.graph import SYSTEM
+    from core.graph import SYSTEM
 
     for token in ("row_count", "count"):
         assert "{" + token + "}" in SYSTEM, token
 
 
 def test_prompt_makes_the_template_mandatory():
-    from sidecardb.graph import SYSTEM
+    from core.graph import SYSTEM
 
     assert "template: required" in SYSTEM

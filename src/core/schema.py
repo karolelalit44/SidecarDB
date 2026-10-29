@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 
-from .types import RetrievalMode
+from core.types import RetrievalMode
 
 
 class SearchRequest(BaseModel):

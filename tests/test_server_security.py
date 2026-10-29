@@ -2,9 +2,9 @@
 
 from fastapi.testclient import TestClient
 
-from sidecardb import SidecarDB
-from sidecardb.config import Settings
-from sidecardb.server import create_app
+from core import AskDB
+from core.config import Settings
+from core.server import create_app
 
 SECRET_KEY = "sekret-key"
 
@@ -23,7 +23,7 @@ def offline_settings(**overrides) -> Settings:
 
 
 def client_for(settings: Settings) -> TestClient:
-    return TestClient(create_app(SidecarDB(settings=settings)), raise_server_exceptions=False)
+    return TestClient(create_app(AskDB(settings=settings)), raise_server_exceptions=False)
 
 
 # --- authentication ---------------------------------------------------------

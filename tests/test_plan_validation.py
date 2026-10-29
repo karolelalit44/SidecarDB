@@ -1,5 +1,5 @@
-from sidecardb.graph import check_plan, normalise_plan, redact
-from sidecardb.types import MeasureFunction, QueryIntent, QueryPlan, SchemaGraph
+from core.graph import check_plan, normalise_plan, redact
+from core.types import MeasureFunction, QueryIntent, QueryPlan, SchemaGraph
 
 
 def test_valid_plan_is_accepted(ecommerce, settings):
@@ -157,24 +157,24 @@ def test_prompt_operator_list_is_generated_from_the_engine():
     Written by hand the two lists drift, and the engine then rejects a plan it
     was told to produce.
     """
-    from sidecardb.constants import OPERATORS
-    from sidecardb.graph import SYSTEM
+    from core.constants import OPERATORS
+    from core.graph import SYSTEM
 
     for operator in OPERATORS:
         assert repr(operator) in SYSTEM, operator
 
 
 def test_prompt_intent_list_is_generated_from_the_enum():
-    from sidecardb.graph import SYSTEM
-    from sidecardb.types import QueryIntent
+    from core.graph import SYSTEM
+    from core.types import QueryIntent
 
     for intent in QueryIntent:
         assert repr(intent.value) in SYSTEM, intent
 
 
 def test_prompt_measure_list_is_generated_from_the_enum():
-    from sidecardb.graph import SYSTEM
-    from sidecardb.types import MeasureFunction
+    from core.graph import SYSTEM
+    from core.types import MeasureFunction
 
     for function in MeasureFunction:
         assert repr(function.value) in SYSTEM, function

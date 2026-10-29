@@ -4,7 +4,7 @@ The engine derives every table, column, filter and join from the live database
 catalog at runtime. That property is easy to state and easy to break by accident
 -- someone adds a ``if "sharma" in q`` special case and genericity silently dies.
 
-This module walks the AST of every source file under ``src/sidecardb`` and fails
+This module walks the AST of every source file under ``src`` and fails
 if any string literal encodes knowledge of a concrete business domain.
 
 Run standalone::
@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-APP_ROOT = Path(__file__).resolve().parent.parent / "src" / "sidecardb"
+APP_ROOT = Path(__file__).resolve().parent.parent / "src"
 
 HTTP_STATUS_CODES = frozenset(
     {200, 201, 204, 400, 401, 403, 404, 409, 413, 422, 429, 500, 502, 503, 504}
@@ -463,7 +463,7 @@ def test_only_the_two_credentials_are_required() -> None:
     two keyword arguments long. Defaults are policy, not hardcoding: they live
     in config.py, which is the code form of .env.example.
     """
-    from sidecardb.config import Settings
+    from core.config import Settings
 
     required = {name for name, field in Settings.model_fields.items() if field.is_required()}
     assert required == {"database_url", "llm_api_key"}
@@ -674,14 +674,14 @@ def test_magic_number_guard_permits_the_allowlist(source: str) -> None:
 @pytest.mark.parametrize(
     "module_path",
     [
-        "sidecardb/render.py",
-        "sidecardb/guard.py",
-        "sidecardb/graph.py",
-        "sidecardb/service.py",
+        "core/render.py",
+        "core/guard.py",
+        "core/graph.py",
+        "core/service.py",
     ],
 )
 def test_core_modules_do_not_import_a_domain(module_path: str) -> None:
-    path = APP_ROOT.parent / module_path
+    path = APP_ROOT / module_path
     if not path.exists():
         pytest.skip(f"{module_path} not present")
     tree = _parse(path)
