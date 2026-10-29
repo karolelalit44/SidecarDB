@@ -1,4 +1,6 @@
 class SearchError(Exception):
+    """Base class for every failure the engine reports to a caller."""
+
     status_code = 400
 
 

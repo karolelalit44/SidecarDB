@@ -1,14 +1,21 @@
 import time
 import unicodedata
+from typing import TYPE_CHECKING
 
 from . import graph as graph_module
-from .answer import narrate, render_template
-from .config import settings
+from .answer import render_template
+from .config import Settings
 from .exceptions import QueryError
 from .logging_config import get_logger
 from .retrieval import SchemaIndex
 from .schema import SearchResponse
 from .types import SchemaGraph
+
+if TYPE_CHECKING:
+    from .db import Database
+    from .embeddings import Embedder
+    from .execute import Executor
+    from .llm import LLMClient
 
 logger = get_logger("service")
 
@@ -39,45 +46,70 @@ def validate_query(text: str) -> tuple[bool, str | None]:
 
 
 class SearchService:
-    def __init__(self):
+    """Owns the catalog, the schema index and one full search pipeline."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        database: "Database",
+        embedder: "Embedder",
+        *,
+        llm: "LLMClient | None" = None,
+        executor: "Executor | None" = None,
+    ) -> None:
+        from .execute import Executor as _Executor
+        from .llm import LLMClient as _LLMClient
+
+        self.settings = settings
+        self.database = database
+        self.embedder = embedder
+        self._llm = llm if llm is not None else _LLMClient(settings)
+        self._executor = executor if executor is not None else _Executor(database, settings)
         self._graph: SchemaGraph | None = None
         self._index: SchemaIndex | None = None
-        self._samples: dict[str, dict[str, list[str]]] = {}
 
     async def startup(self) -> None:
-        from .db import database
-
-        await database.connect()
+        await self.database.connect()
         await self.refresh()
 
     async def shutdown(self) -> None:
-        from .db import database
-
-        await database.close()
+        await self.database.close()
+        await self.embedder.aclose()
         self._graph = None
         self._index = None
-        self._samples = {}
+        logger.debug("shutdown: catalog and schema index released")
 
     async def refresh(self) -> SchemaGraph:
-        from .db import database
-
-        self._graph = await database.introspect()
-        self._index = await SchemaIndex().build(self._graph)
-        self._samples = {}
-        logger.info(
-            "Catalog mapped: %d tables, %d extension-backed columns",
+        started = time.perf_counter()
+        logger.debug("refresh: introspecting the catalog of schema %s", self.settings.db_schema)
+        self._graph = await self.database.introspect()
+        logger.debug(
+            "refresh: %d tables introspected in %d ms; rebuilding the schema index",
             len(self._graph.tables),
-            len(self._graph.indexed_columns),
+            round((time.perf_counter() - started) * 1000, self.settings.elapsed_precision),
+        )
+        self._index = await SchemaIndex(self.embedder, self.settings).build(self._graph)
+        logger.debug("refresh: schema index %s", "ready" if self._index.ready else "unavailable")
+        logger.info(
+            "Catalog mapped: %d tables",
+            len(self._graph.tables),
         )
         return self._graph
 
     async def schema(self) -> SchemaGraph:
         if self._graph is None:
-            await self.refresh()
+            logger.debug("schema: no catalog held yet; introspecting on demand")
+            return await self.refresh()
         return self._graph
 
+    def catalog_names(self) -> list[str]:
+        """Names currently mapped, without touching the database."""
+        return self._graph.names if self._graph is not None else []
+
     async def search(self, question: str, request_id: str | None = None) -> SearchResponse:
+        settings = self.settings
         query = (question or "").strip()
+        logger.debug("[%s] search received %d chars", request_id, len(query))
         if len(query) < settings.min_query_length:
             raise QueryError("The question is too short.")
         if len(query) > settings.max_query_length:
@@ -100,7 +132,9 @@ class SearchService:
         )
 
         try:
-            outcome = await graph_module.run(query, graph, self._index, self._samples)
+            outcome = await graph_module.run(
+                query, graph, self._index, settings, self._llm, self._executor
+            )
         except Exception as exc:
             logger.error(
                 "[%s] search failed after %d ms: %s: %s",
@@ -120,30 +154,38 @@ class SearchService:
                 "[%s] no rows returned; using the configured no-records message",
                 request_id,
             )
-        elif outcome.plan.template:
-            answer = render_template(outcome.plan.template, rows, outcome.plan.intent)
-            if answer:
-                logger.debug("[%s] answered from the plan template", request_id)
-            else:
-                answer = await narrate(query, rows)
-                logger.debug(
-                    "[%s] template was unusable; answered by narration over %d rows",
-                    request_id,
-                    len(rows),
-                )
         else:
-            answer = await narrate(query, rows)
-            logger.debug("[%s] answered by narration over %d rows", request_id, len(rows))
+            answer = render_template(
+                outcome.plan.template or "",
+                rows,
+                outcome.plan.intent,
+                max_chars=settings.error_message_max_chars,
+            )
+            if not answer:
+                answer = settings.no_summary_message
+                logger.debug(
+                    "[%s] the plan carried no usable response template; using the no-summary "
+                    "message",
+                    request_id,
+                )
 
         elapsed = round((time.perf_counter() - started) * 1000, settings.elapsed_precision)
+        logger.debug(
+            "[%s] response ready: rows=%d answer_chars=%d expose_sql=%s",
+            request_id,
+            len(rows),
+            len(answer),
+            settings.expose_sql,
+        )
         logger.info(
-            "[%s] intent=%s mode=%s rows=%d tables=%s sql=%s",
+            "[%s] intent=%s mode=%s rows=%d tables=%s sql=%s bound_params=%d",
             request_id,
             outcome.plan.intent.value,
             outcome.retrieval_mode.value,
             len(rows),
             outcome.retrieved_tables,
             outcome.sql,
+            len(outcome.params),
         )
 
         return SearchResponse(
@@ -157,6 +199,3 @@ class SearchService:
             retrieval_mode=outcome.retrieval_mode,
             request_id=request_id,
         )
-
-
-service = SearchService()

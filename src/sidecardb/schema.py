@@ -10,6 +10,8 @@ class SearchRequest(BaseModel):
 class SearchResponse(BaseModel):
     query: str
     answer: str
+    # Present only when settings.expose_sql is on; off by default because it
+    # discloses table names and query shape to the caller.
     sql: str | None = None
     row_count: int = 0
     elapsed_ms: float = 0.0
@@ -22,6 +24,7 @@ class SearchResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     app: str
+    version: str = ""
     database: str
     tables: int = 0
     model: str = ""

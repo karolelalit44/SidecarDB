@@ -39,12 +39,7 @@ DEFAULT_COMPARISON = COMPARISON_OPERATORS[0]
 EQUALITY_ALIASES = ("==",)
 
 TYPE_CATEGORY_NUMERIC = "N"
-TYPE_CATEGORY_STRING = "S"
 TYPE_CATEGORY_UNKNOWN = "X"
-
-VECTOR_CAST = "::vector"
-VECTOR_TYPE = "vector"
-SIMILARITY_ALIAS = "similarity"
 
 COUNT_ALIAS = "record_count"
 
@@ -55,7 +50,31 @@ DATABASE_UP = "connected"
 DATABASE_DOWN = "unavailable"
 EMBEDDING_OFF = "disabled"
 
+PROVIDER_API = "api"
+PROVIDER_LOCAL = "local"
+PROVIDER_NONE = "none"
+
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+LogFormat = Literal["text", "json"]
+LogColour = Literal["auto", "on", "off"]
+
+# The namespace every sidecardb logger lives under. Attaching handlers to this
+# logger (and only this logger) is what keeps the library from touching a host
+# application's logging configuration.
+NAMESPACE = "sidecardb"
+
+# PostgreSQL identifiers are capped at NAMEDATALEN - 1 characters.
+PG_IDENTIFIER_MAX_LENGTH = 63
+
+# A client-supplied request id is echoed into logs; it is length-capped so a
+# hostile header cannot flood them.
+REQUEST_ID_MAX_LENGTH = 64
+
+REQUEST_ID_HEADER = "X-Request-ID"
+API_KEY_HEADER = "X-API-Key"
+AUTHORIZATION_HEADER = "Authorization"
+RETRY_AFTER_HEADER = "Retry-After"
+BEARER_PREFIX = "bearer "
 
 
 FENCE = "```"
@@ -128,3 +147,6 @@ COLOURS = {
 WILDCARD = "*"
 
 TRUNCATION_MARK = " [...]"
+
+MS_PER_SECOND = 1000
+BACKOFF_FACTOR = 2

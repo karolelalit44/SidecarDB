@@ -1,27 +1,62 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
-name = "nl-db-search"
-version = "2.0.0"
-description = "Ask a database a question in plain text and get the rows back."
+name = "sidecardb"
+version = "2.1.0"
+description = "Ask a PostgreSQL database a question in plain English and get the rows back."
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.12"
+authors = [{ name = "sidecardb contributors" }]
+keywords = ["nl2sql", "postgres", "llm", "search", "rag", "natural-language"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Database :: Front-Ends",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
 dependencies = [
-    "fastapi>=0.115.0",
-    "uvicorn[standard]>=0.31.0",
-    "pydantic>=2.9.0",
-    "pydantic-settings>=2.5.0",
-    "asyncpg>=0.29.0",
-    "sqlglot>=25.20.0",
-    "langchain-openai>=1.0.0",
-    "httpx>=0.27.0",
-    "python-dotenv>=1.0.1",
-    "sentence-transformers>=3.0.0",
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.31,<1.0",
+    "pydantic>=2.9,<3.0",
+    "pydantic-settings>=2.5,<3.0",
+    "asyncpg>=0.29,<1.0",
+    "sqlglot>=25.20,<31.0",
+    "langchain-openai>=1.0,<2.0",
+    "httpx>=0.27,<1.0",
+    "python-dotenv>=1.0,<2.0",
 ]
 
 [project.optional-dependencies]
+# Local embedding models via sentence-transformers (pulls in torch; several GB).
+# The default "api" provider needs none of this.
+embeddings = ["sentence-transformers>=3.0,<7.0"]
 dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
     "ruff>=0.6.0",
+    "mypy>=1.11.0",
+    "build>=1.2.0",
 ]
+
+[project.scripts]
+sidecardb = "sidecardb.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/karolelalit44/poc-db-nl-search"
+Repository = "https://github.com/karolelalit44/poc-db-nl-search"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sidecardb"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/sidecardb", "tests", "README.md", "LICENSE", "pyproject.toml"]
+exclude = ["local"]
 
 [tool.ruff]
 line-length = 100
@@ -32,13 +67,27 @@ select = ["F", "E", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF", "DTZ", "T20", 
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101"]
-"scripts/*" = ["T201"]
+"src/sidecardb/cli.py" = ["T20"]
 
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
 
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+packages = ["sidecardb"]
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["sidecardb.llm", "sidecardb.db", "sidecardb.embeddings"]
+disallow_untyped_defs = false
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = ["src"]

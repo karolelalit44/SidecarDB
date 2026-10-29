@@ -1,31 +1,15 @@
-"""The answer layer: template binding and narration row-block assembly."""
+"""The answer layer: template binding."""
 
-import json
-
-from app.answer import SCALAR_INTENTS, _trim, narrate, render_template
-from app.types import QueryIntent
+from sidecardb.answer import SCALAR_INTENTS, render_template
+from sidecardb.types import QueryIntent
 
 COUNT_ROWS = [{"record_count": 3}]
 FETCH_ROWS = [{"order_reference": "R-1"}, {"order_reference": "R-2"}]
-
-
-class Result:
-    def __init__(self, text):
-        self.content = text
-
-
-class Chat:
-    def __init__(self, text="two orders"):
-        self.text = text
-        self.calls = []
-
-    async def ainvoke(self, messages, **_kwargs):
-        self.calls.append(messages)
-        return Result(self.text)
+MAX_CHARS = 200
 
 
 def _bind(template, records, intent):
-    return render_template(template, records, intent)
+    return render_template(template, records, intent, max_chars=MAX_CHARS)
 
 
 # --- {row_count} on a scalar result -----------------------------------------
@@ -73,9 +57,9 @@ def test_projected_column_names_are_bound():
 def test_unknown_placeholder_is_not_shown_to_the_caller():
     """Raw template syntax must never reach the user.
 
-    A model will invent a placeholder that names nothing in the result. An
-    empty string is the signal for the caller to narrate the rows instead;
-    echoing "{nope}" would present template markup as if it were the answer.
+    A model will invent a placeholder that names nothing in the result. An empty
+    string is the signal for the caller to use the configured no-summary
+    message; echoing "{nope}" would present template markup as the answer.
     """
     assert _bind("{nope}", FETCH_ROWS, QueryIntent.retrieve) == ""
 
@@ -91,51 +75,31 @@ def test_bound_placeholder_alongside_none_still_renders():
 
 
 def test_empty_template_renders_empty():
-    assert render_template("", FETCH_ROWS, QueryIntent.retrieve) == ""
-    assert render_template("   ", FETCH_ROWS, QueryIntent.retrieve) == ""
+    assert render_template("", FETCH_ROWS, QueryIntent.retrieve, max_chars=MAX_CHARS) == ""
+    assert render_template("   ", FETCH_ROWS, QueryIntent.retrieve, max_chars=MAX_CHARS) == ""
+
+
+def test_rendering_is_capped_at_the_configured_length():
+    long_template = "x " * 100
+    rendered = render_template(long_template, FETCH_ROWS, QueryIntent.retrieve, max_chars=10)
+    assert len(rendered) == 10
 
 
 def test_scalar_intents_are_exactly_the_ones_that_collapse_to_one_number():
     assert set(SCALAR_INTENTS) == {QueryIntent.count, QueryIntent.aggregate}
 
 
-# --- narration row block -----------------------------------------------------
+# --- the planner is told which placeholders exist ----------------------------
 
 
-def _records(n):
-    return [{"ref": f"R-{i}", "amount": float(i), "note": "x" * 40} for i in range(n)]
+def test_prompt_documents_every_placeholder_the_engine_binds():
+    from sidecardb.graph import SYSTEM
+
+    for token in ("row_count", "count"):
+        assert "{" + token + "}" in SYSTEM, token
 
 
-def test_trimmed_rows_form_valid_json_that_matches_the_original():
-    records = _records(20)
-    for budget in (200, 5000, 10**9):
-        kept, truncated = _trim(records, budget)
-        block = "[" + ",".join(kept) + "]"
-        assert json.loads(block) == records[: len(kept)]
-        assert truncated is (len(kept) < len(records))
+def test_prompt_makes_the_template_mandatory():
+    from sidecardb.graph import SYSTEM
 
-
-def test_trim_always_keeps_at_least_one_record():
-    kept, truncated = _trim(_records(5), 1)
-    assert len(kept) == 1
-    assert truncated is True
-
-
-async def test_narrate_sends_parseable_rows(monkeypatch):
-    import app.answer as answer_module
-
-    records = _records(12)
-    chat = Chat("twelve orders")
-    monkeypatch.setattr(answer_module, "chat_model", lambda: chat)
-
-    assert await narrate("how many orders", records) == "twelve orders"
-
-    rows_section = chat.calls[0][1][1].split("ROWS (")[1].split("\n", 1)[1]
-    payload = rows_section[rows_section.index("[") : rows_section.rindex("]") + 1]
-    assert json.loads(payload) == records
-
-
-async def test_narrate_on_no_records_uses_the_configured_message(monkeypatch):
-    from app.config import settings
-
-    assert await narrate("anything", []) == settings.no_records_message
+    assert "template: required" in SYSTEM

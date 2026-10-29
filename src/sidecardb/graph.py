@@ -1,10 +1,10 @@
 import time
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 from pydantic import ValidationError
 
-from . import execute, fallback, render
-from .config import settings
+from . import render
+from .config import Settings
 from .constants import (
     COMPARISON_OPERATORS,
     COUNT_ALIAS,
@@ -14,16 +14,17 @@ from .constants import (
     OPERATORS,
     PATTERN_OPERATORS,
 )
-from .db import join_path
 from .exceptions import ConfigurationError, ExecutionError, PlanningError, ProviderError
-from .llm import complete_json, prompt_chars, trim
+from .llm import prompt_chars, trim
 from .logging_config import get_logger
-from .retrieval import SchemaIndex
 from .types import MeasureFunction, QueryIntent, QueryPlan, RetrievalMode, SchemaGraph
 
-logger = get_logger("graph")
+if TYPE_CHECKING:
+    from .execute import Executor
+    from .llm import LLMClient
+    from .retrieval import SchemaIndex
 
-JOIN_AWARE_INTENTS = (QueryIntent.retrieve, QueryIntent.lookup)
+logger = get_logger("graph")
 
 OPERATOR_TEXT = (
     f"a comparison ({', '.join(repr(op) for op in COMPARISON_OPERATORS)}), "
@@ -33,23 +34,21 @@ OPERATOR_TEXT = (
 
 SYSTEM = f"""\
 You produce a QueryPlan JSON object for the schema supplied below.
-The JSON object must include "table" and "intent", plus any needed optional fields.
-Never return data results directly; return the plan specification only.
+The JSON object must include "table", "intent" and "template", plus any needed
+optional fields. Never return data results directly; return the plan
+specification only. There is exactly one model call per question, so the
+template must be complete and answerable on its own.
 
 Inputs you are given:
-- SCHEMA: tables, columns, data types, keys, foreign keys, operator-written comments.
-- KNOWN VALUES: values observed in low-cardinality columns.
+- SCHEMA: tables, columns, data types, operator-written comments.
 
 Field contracts:
-- table: required. The one table that answers the question on its own.
-- related_tables: only tables the answer also needs. Every one must have a
-  foreign-key path to table within the allowed join depth.
+- table: required. The one table that answers the question.
 - intent: one of {", ".join(repr(i.value) for i in QueryIntent)}.
   "count" yields one row holding a row count. "aggregate" yields one row per group
   (or one row overall) holding measure_function applied to measure_column.
   "distinct" yields unique combinations of projection columns. "retrieve" yields
-  one row per matching record. "lookup" is "retrieve" narrowed by a key or an
-  exact value.
+  one row per matching record.
 - measure_column / measure_function: required together by "aggregate".
   measure_function is one of {", ".join(repr(m.value) for m in MeasureFunction)}.
   measure_function "count" counts rows and needs no measure_column; every other
@@ -66,28 +65,24 @@ Field contracts:
   true or false.
 - group_by: the non-measured columns of an aggregate that must be listed per group.
   Leave empty when not aggregating.
-- template: a concise single-sentence English response template (max 200 chars)
-  with placeholders in curly braces. Do not include markdown.
-  For "count" and "aggregate" the computed number is bound to {{row_count}},
-  {{count}}, {{value}}, {{result}} and {{total}}.
-  For every intent, {{row_count}} and {{count}} are the number of rows returned,
-  and each returned column name is also bound.
+- template: required. The English sentence that answers the question once the
+  rows are in. One or two sentences, max 200 chars, no markdown, no mention of
+  SQL, tables or columns. Use placeholders in curly braces and only these:
+  {{row_count}} and {{count}} for the number of rows returned, the number in a
+  count or aggregate row, plus the name of each projected column.
 
 Constraints:
 - Every table and column must appear in SCHEMA. The plan is checked against the
   catalog and a rejected plan is returned to you with the reason.
 - Never guess column names not in SCHEMA. For recency or date ordering, select an
   existing date or timestamp column from SCHEMA.
-- Prefer a value taken from KNOWN VALUES or from the question over an invented one.
+- Prefer a value taken from the question over an invented one.
 - Leave any field you do not need unset.
 """
 
 USER = """\
 SCHEMA
 {schema}
-
-KNOWN VALUES
-{values}
 
 QUESTION
 {question}
@@ -107,35 +102,19 @@ class Outcome(NamedTuple):
 
     plan: QueryPlan
     sql: str
+    params: tuple[str, ...]
     rows: list[dict]
     retrieved_tables: list[str]
     retrieval_mode: RetrievalMode
 
 
 def column_scope(plan: QueryPlan, graph: SchemaGraph) -> set[str]:
-    available: set[str] = set()
-    for name in plan.tables:
-        info = graph.tables.get(name)
-        if info is not None:
-            available.update(info.column_names)
-    return available
+    info = graph.tables.get(plan.table)
+    return set(info.column_names) if info is not None else set()
 
 
-def normalise_plan(plan: QueryPlan, graph: SchemaGraph) -> QueryPlan:
-    related_tables = list(plan.related_tables)
+def normalise_plan(plan: QueryPlan, graph: SchemaGraph, settings: Settings) -> QueryPlan:
     available = column_scope(plan, graph)
-
-    if plan.filter_column and plan.filter_column not in available:
-        for t_name, t_info in graph.tables.items():
-            if (
-                t_name != plan.table
-                and plan.filter_column in t_info.column_names
-                and render.find_relation(plan.table, t_name, graph) is not None
-                and t_name not in related_tables
-            ):
-                related_tables.append(t_name)
-                available.update(t_info.column_names)
-                break
 
     def fix(column: str | None) -> str | None:
         if column is None or column in available:
@@ -162,24 +141,11 @@ def normalise_plan(plan: QueryPlan, graph: SchemaGraph) -> QueryPlan:
 
     def fix_all(columns: list[str]) -> list[str]:
         return [
-            fix(c)
+            fixed
             for c in columns
-            if not (plan.intent is QueryIntent.aggregate and (c == "count" or c == COUNT_ALIAS))
+            if (fixed := fix(c)) is not None
+            and not (plan.intent is QueryIntent.aggregate and (c == "count" or c == COUNT_ALIAS))
         ]
-
-    def fix_related(names: list[str]) -> list[str]:
-        """Keep only tables that can be joined to the base table."""
-        kept: list[str] = []
-        for name in names:
-            candidate = name.split(".", 1)[0]
-            if candidate == plan.table or candidate not in graph.tables:
-                continue
-            if candidate in kept:
-                continue
-            if render.find_relation(plan.table, candidate, graph) is None:
-                continue
-            kept.append(candidate)
-        return kept
 
     def fix_template(tpl: str | None) -> str | None:
         if not tpl:
@@ -234,7 +200,6 @@ def normalise_plan(plan: QueryPlan, graph: SchemaGraph) -> QueryPlan:
         filter_operator = None
 
     updates = {
-        "related_tables": fix_related(related_tables),
         "filter_column": filter_column,
         "filter_operator": filter_operator,
         "order_by": order_by,
@@ -257,47 +222,19 @@ def normalise_plan(plan: QueryPlan, graph: SchemaGraph) -> QueryPlan:
     return plan.model_copy(update=updates)
 
 
-def with_join_keys(plan: QueryPlan, graph: SchemaGraph) -> QueryPlan:
-    if plan.intent not in JOIN_AWARE_INTENTS:
-        return plan
-    if not plan.related_tables or not plan.projection:
-        return plan
-
-    projection = list(plan.projection)
-    added = False
-
-    for related in plan.related_tables:
-        for fk in graph.foreign_keys:
-            if {fk.from_table, fk.to_table} != {plan.table, related}:
-                continue
-            for column in (fk.from_column, fk.to_column):
-                if column not in projection:
-                    projection.append(column)
-                    added = True
-
-    if not added:
-        return plan
-
-    return plan.model_copy(update={"projection": sorted(set(projection), key=projection.index)})
-
-
-def check_plan(plan: QueryPlan, graph: SchemaGraph) -> str | None:
+def check_plan(plan: QueryPlan, graph: SchemaGraph, settings: Settings) -> str | None:
     if plan.table not in graph.tables:
         return f"table '{plan.table}' does not exist in the schema"
-
-    for related in plan.related_tables:
-        if related not in graph.tables:
-            return f"related table '{related}' does not exist in the schema"
 
     available = column_scope(plan, graph)
 
     for value in (plan.measure_column, plan.filter_column, plan.order_by):
         if value and value not in available:
-            return _unknown_column(value, available)
+            return _unknown_column(value, available, settings)
 
     for value in (*plan.projection, *plan.group_by, *plan.text_search_columns):
         if value not in available:
-            return _unknown_column(value, available)
+            return _unknown_column(value, available, settings)
 
     if plan.filter_column and not plan.filter_operator:
         return "a filter column requires filter_operator"
@@ -311,31 +248,22 @@ def check_plan(plan: QueryPlan, graph: SchemaGraph) -> str | None:
         if plan.measure_function.needs_column:
             if not plan.measure_column:
                 return "an aggregate plan requires measure_column"
-            numeric_anywhere = any(
-                plan.measure_column in graph.tables[name].numeric_columns
-                for name in plan.tables
-                if name in graph.tables
-            )
-            if not numeric_anywhere:
+            if plan.measure_column not in graph.tables[plan.table].numeric_columns:
                 numeric = ", ".join(graph.tables[plan.table].numeric_columns) or "none"
                 return (
                     f"column '{plan.measure_column}' is not numeric; numeric columns are: {numeric}"
                 )
 
-    for related in plan.related_tables:
-        if join_path(plan.table, related, graph, settings.max_join_depth) is None:
-            return f"no foreign key path connects {plan.table} and {related}"
-
     return None
 
 
-def _unknown_column(value: str, available: set[str]) -> str:
+def _unknown_column(value: str, available: set[str], settings: Settings) -> str:
     """Return error message listing available columns for repair."""
     listing = ", ".join(sorted(available)[: settings.max_schema_columns])
     return f"column '{value}' does not exist; available columns are: {listing}"
 
 
-def redact(reason: str) -> str:
+def redact(reason: str, settings: Settings) -> str:
     if not settings.redact_catalog_in_errors:
         return reason
     return reason.split(";")[0].strip()
@@ -347,143 +275,56 @@ def _elapsed_ms(started: float) -> int:
 
 
 async def link(
-    question: str, graph: SchemaGraph, index: SchemaIndex | None
-) -> tuple[list[str], RetrievalMode, list[str], dict[str, float]]:
+    question: str, graph: SchemaGraph, index: "SchemaIndex | None", settings: Settings
+) -> tuple[list[str], RetrievalMode, list[str]]:
     if index is not None:
-        columns = await index.columns_for(question, settings.retrieval_min_score)
         tables = await index.tables_for(
             question, settings.max_schema_tables, settings.retrieval_min_score
         )
         if tables:
-            return tables, RetrievalMode.embedding, tables, columns
+            return tables, RetrievalMode.embedding, tables
 
+    logger.debug(
+        "link: no embedding match at or above %s; falling back to catalog order",
+        settings.retrieval_min_score,
+    )
     ordered = sorted(graph.tables.values(), key=lambda t: t.row_estimate, reverse=True)
     names = [t.name for t in ordered[: settings.max_schema_tables]]
-    return names, RetrievalMode.catalog, [], {}
-
-
-async def collect_values(
-    graph: SchemaGraph,
-    tables: list[str],
-    cache: dict | None = None,
-    relevance: dict | None = None,
-) -> dict:
-    """Sampled values per table, memoised until the catalog is rebuilt."""
-    if not settings.sample_values_enabled:
-        return {}
-
-    wanted: set[tuple[str, str]] | None = None
-    if relevance:
-        ranked = sorted(relevance.items(), key=lambda pair: pair[1], reverse=True)
-        wanted = set()
-        for qualified, _score in ranked[: settings.retrieval_top_k]:
-            table_name, _, column_name = qualified.rpartition(".")
-            wanted.add((table_name, column_name))
-        if not wanted:
-            wanted = None
-
-    samples: dict[str, dict[str, list[str]]] = {}
-    for table_name in tables:
-        if graph.tables.get(table_name) is None:
-            continue
-        if cache is not None and table_name in cache:
-            if cache[table_name]:
-                samples[table_name] = cache[table_name]
-            continue
-
-        sampled, complete = await _sample_table(graph, table_name, wanted)
-        if cache is not None and complete:
-            cache[table_name] = sampled
-        if sampled:
-            samples[table_name] = sampled
-    return samples
-
-
-def _samplable(_table_name: str, column, row_estimate: int) -> bool:
-    """Check if column values are suitable and safe to sample."""
-    if column.primary_key or not column.is_string:
-        return False
-
-    lowered = column.name.lower()
-    if any(lowered == entry.lower() for entry in settings.value_sample_denylist):
-        return False
-    marker = settings.value_sample_sensitive_marker
-    if marker and column.description and marker.lower() in column.description.lower():
-        return False
-
-    if row_estimate > 0 and column.distinct_estimate >= row_estimate:
-        return False
-
-    return 1 < column.distinct_estimate <= settings.value_sample_max
-
-
-async def _sample_table(
-    graph: SchemaGraph, table_name: str, wanted: set[tuple[str, str]] | None
-) -> tuple[dict[str, list[str]], bool]:
-    table = graph.tables[table_name]
-    ceiling = settings.value_sample_max_length
-    samples: dict[str, list[str]] = {}
-    complete = True
-
-    for column in table.columns:
-        if wanted is not None and (table_name, column.name) not in wanted:
-            continue
-        if not _samplable(table_name, column, table.row_estimate):
-            continue
-
-        try:
-            prepared = execute.prepare(
-                f'SELECT DISTINCT "{column.name}" AS value FROM "{table_name}" '
-                f'WHERE "{column.name}" IS NOT NULL '
-                f"LIMIT {settings.value_sample_limit}",
-                graph,
-            )
-            rows = await execute.run(prepared)
-        except Exception as exc:
-            logger.debug("Sampling skipped for %s.%s: %s", table_name, column.name, exc)
-            complete = False
-            continue
-
-        values = [
-            str(row["value"])
-            for row in rows
-            if row.get("value") is not None and len(str(row["value"])) <= ceiling
-        ]
-        if 1 < len(values) <= settings.value_sample_max:
-            samples[column.name] = values
-    return samples, complete
+    return names, RetrievalMode.catalog, []
 
 
 async def plan(
     question: str,
     graph: SchemaGraph,
     tables: list[str],
-    values: dict,
+    settings: Settings,
+    llm: "LLMClient",
     error: str | None = None,
     attempt: int = 0,
 ) -> tuple[QueryPlan | None, str | None]:
     """Execute one query planning attempt, with repair prompt if retrying."""
-    prompt = build_prompt(question, graph, tables, values)
+    prompt = build_prompt(question, graph, tables, settings)
     if error:
         prompt = f"{REPAIR.format(error=error[: settings.repair_char_budget])}\n\n{prompt}"
 
     temperature = settings.llm_temperature if attempt == 0 else settings.llm_repair_temperature
 
     logger.debug(
-        "Planning attempt %d: tables=%d prompt_chars=%d sampled_value_tables=%d "
-        "temperature=%s repairing=%s",
+        "Planning attempt %d: tables=%d prompt_chars=%d temperature=%s repairing=%s",
         attempt + 1,
         len(tables),
         len(prompt),
-        len(values),
         temperature,
         error,
     )
 
     try:
-        payload = await complete_json(SYSTEM, prompt, temperature)
-        result = with_join_keys(normalise_plan(QueryPlan.model_validate(payload), graph), graph)
+        payload = await llm.complete_json(SYSTEM, prompt, temperature)
+        logger.debug("Plan payload: %s", payload)
+        result = normalise_plan(QueryPlan.model_validate(payload), graph, settings)
     except (ConfigurationError, ProviderError):
+        # A misconfigured or unreachable provider is not a bad plan; retrying
+        # it as one would burn every attempt on the same outage.
         raise
     except (PlanningError, ValidationError) as exc:
         logger.debug("Plan malformed: %s: %s", type(exc).__name__, exc)
@@ -492,7 +333,7 @@ async def plan(
         logger.warning("Planner call failed: %s: %s", type(exc).__name__, exc)
         return None, "a usable plan could not be produced"
 
-    reason = check_plan(result, graph)
+    reason = check_plan(result, graph, settings)
     if reason:
         logger.debug(
             "Plan rejected: %s (intent=%s table=%s)",
@@ -503,11 +344,9 @@ async def plan(
         return None, reason
 
     logger.debug(
-        "Plan accepted: intent=%s table=%s related=%s measure=%s/%s filter=%s %s %r "
-        "projection=%d order_by=%s",
+        "Plan accepted: intent=%s table=%s measure=%s/%s filter=%s %s %r projection=%d order_by=%s",
         result.intent.value,
         result.table,
-        result.related_tables,
         result.measure_function.value if result.measure_function else None,
         result.measure_column,
         result.filter_column,
@@ -519,74 +358,41 @@ async def plan(
     return result, None
 
 
-async def run_sql(sql: str) -> list[dict]:
-    if not sql:
-        return []
-    try:
-        return await execute.run(sql)
-    except ExecutionError as exc:
-        logger.warning("Execution failed: %s", exc)
-        return []
-
-
-async def vector_fallback(graph: SchemaGraph, tables: list[str], question: str) -> list[dict]:
-    return await fallback.search(graph, tables, question)
-
-
-def render_values(values: dict) -> str:
-    if not values:
-        return "No low-cardinality columns were available to sample."
-    lines = [
-        f"{table}.{column}: {', '.join(items[: settings.value_sample_limit])}"
-        for table, columns in values.items()
-        for column, items in columns.items()
-    ]
-    return "\n".join(lines)
-
-
-def build_prompt(question: str, graph: SchemaGraph, tables: list[str], values: dict) -> str:
+def build_prompt(question: str, graph: SchemaGraph, tables: list[str], settings: Settings) -> str:
     """Assemble the planner prompt bounded by LLM context budget."""
     reserve = settings.llm_max_tokens + len(SYSTEM) // settings.llm_chars_per_token
-    budget = prompt_chars(reserve)
-    overhead = len(USER) + len(question)
+    budget = prompt_chars(reserve, settings)
+    schema_overhead = len(USER) - len("{schema}") - len("{question}")
 
-    schema = trim(graph.describe(tables, settings.max_schema_columns), budget // 2)
-    known = trim(render_values(values), max(budget - len(schema) - overhead, 0))
+    schema = trim(graph.describe(tables, settings.max_schema_columns), budget - schema_overhead)
 
-    return USER.format(schema=schema, values=known, question=question)
+    return USER.format(schema=schema, question=question)
 
 
 async def run(
     question: str,
     graph: SchemaGraph,
-    index: SchemaIndex | None,
-    samples: dict | None = None,
+    index: "SchemaIndex | None",
+    settings: Settings,
+    llm: "LLMClient",
+    executor: "Executor",
 ) -> Outcome:
-    """Execute query generation pipeline: link -> collect -> plan -> render -> run."""
+    """Execute query generation pipeline: link -> plan -> render -> run."""
+    logger.debug("run: planning for %r", question)
     stage = time.perf_counter()
-    tables, retrieval_mode, retrieved_tables, relevance = await link(question, graph, index)
+    tables, retrieval_mode, retrieved_tables = await link(question, graph, index, settings)
     linked_ms = _elapsed_ms(stage)
     logger.debug(
-        "link: mode=%s tables=%s scored_columns=%d in %d ms",
+        "link: mode=%s tables=%s in %d ms",
         retrieval_mode.value,
         tables,
-        len(relevance),
         linked_ms,
-    )
-
-    stage = time.perf_counter()
-    values = await collect_values(graph, tables, samples, relevance)
-    logger.debug(
-        "collect_values: %d tables sampled, %d columns known, %d ms",
-        len(values),
-        sum(len(columns) for columns in values.values()),
-        _elapsed_ms(stage),
     )
 
     plan_result = None
     error = None
     for attempt in range(settings.max_plan_attempts):
-        plan_result, error = await plan(question, graph, tables, values, error, attempt)
+        plan_result, error = await plan(question, graph, tables, settings, llm, error, attempt)
         if plan_result is not None:
             break
         logger.debug(
@@ -598,27 +404,37 @@ async def run(
 
     if plan_result is None:
         logger.error("No plan survived %d attempts: %s", settings.max_plan_attempts, error)
-        raise PlanningError(redact(error or "No valid plan was produced."))
+        raise PlanningError(redact(error or "No valid plan was produced.", settings))
 
     try:
-        sql = execute.prepare(render.build(plan_result, graph), graph)
+        rendered = render.build(plan_result, graph)
+        sql = executor.prepare(rendered, graph)
     except Exception as exc:
         logger.warning("Render failed: %s: %s", type(exc).__name__, exc)
-        raise PlanningError(redact(str(exc))) from exc
+        raise PlanningError(redact(str(exc), settings)) from exc
 
-    logger.debug("render: %s", sql)
+    logger.debug("render: %s (%d bound parameter(s))", sql, len(rendered.params))
 
-    rows = await run_sql(sql)
-    if rows:
-        logger.debug("run_sql: %d rows returned", len(rows))
-    else:
-        logger.info("run_sql returned no rows; falling back to vector similarity")
-        rows = await vector_fallback(graph, tables, question)
-        logger.debug("vector_fallback: %d rows returned", len(rows))
+    # An execution failure surfaces as itself, never as an empty result set:
+    # "the query failed" and "no rows matched" are different answers.
+    try:
+        rows = await executor.run(sql, *rendered.params)
+    except ExecutionError as exc:
+        logger.warning("Execution failed: %s", exc)
+        raise
+
+    logger.debug(
+        "run: finished mode=%s tables=%d rows=%d in %d ms",
+        retrieval_mode.value,
+        len(tables),
+        len(rows),
+        _elapsed_ms(stage),
+    )
 
     return Outcome(
         plan=plan_result,
         sql=sql,
+        params=rendered.params,
         rows=rows,
         retrieved_tables=retrieved_tables,
         retrieval_mode=retrieval_mode,

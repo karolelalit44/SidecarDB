@@ -1,12 +1,8 @@
 import pytest
 
-from app.types import (
-    ColumnInfo,
-    ForeignKeyInfo,
-    IndexedColumn,
-    SchemaGraph,
-    TableInfo,
-)
+from sidecardb.config import Settings
+from sidecardb.exceptions import EmbeddingError
+from sidecardb.types import ColumnInfo, SchemaGraph, TableInfo
 
 CATEGORY = {
     "uuid": "U",
@@ -21,36 +17,21 @@ CATEGORY = {
 }
 
 
-def column(name, data_type, *, pk=False, description=None, distinct=None):
+def column(name, data_type, *, description=None):
     return ColumnInfo(
         name=name,
         data_type=data_type,
         type_category=CATEGORY.get(data_type, "U"),
-        nullable=not pk,
-        primary_key=pk,
         description=description,
-        distinct_estimate=distinct if distinct is not None else 0.0,
     )
 
 
-def table(name, columns, *, fks=(), description=None, rows=100, embeddings=()):
+def table(name, columns, *, description=None, rows=100):
     return TableInfo(
         name=name,
         description=description,
         columns=list(columns),
-        primary_keys=[c.name for c in columns if c.primary_key],
-        foreign_keys=list(fks),
         row_estimate=rows,
-        embedding_columns=list(embeddings),
-    )
-
-
-def fk(from_table, from_column, to_table, to_column):
-    return ForeignKeyInfo(
-        from_table=from_table,
-        from_column=from_column,
-        to_table=to_table,
-        to_column=to_column,
     )
 
 
@@ -59,10 +40,10 @@ ECOMMERCE = SchemaGraph(
         "products": table(
             "products",
             [
-                column("id", "uuid", pk=True),
-                column("sku", "varchar", distinct=180),
-                column("title", "varchar", distinct=180),
-                column("category", "varchar", distinct=6),
+                column("id", "uuid"),
+                column("sku", "varchar"),
+                column("title", "varchar"),
+                column("category", "varchar"),
                 column("unit_price", "numeric"),
                 column("stock_on_hand", "integer"),
             ],
@@ -71,10 +52,10 @@ ECOMMERCE = SchemaGraph(
         "customers": table(
             "customers",
             [
-                column("id", "uuid", pk=True),
-                column("display_name", "varchar", distinct=90),
-                column("email_address", "varchar", distinct=90),
-                column("city", "varchar", distinct=14),
+                column("id", "uuid"),
+                column("display_name", "varchar"),
+                column("email_address", "varchar"),
+                column("city", "varchar"),
                 column("signed_up_on", "timestamp with time zone"),
             ],
             description="Registered buyers",
@@ -82,79 +63,61 @@ ECOMMERCE = SchemaGraph(
         "orders": table(
             "orders",
             [
-                column("id", "uuid", pk=True),
-                column("order_reference", "varchar", distinct=120),
+                column("id", "uuid"),
+                column("order_reference", "varchar"),
                 column("customer_id", "uuid"),
                 column("placed_at", "timestamp with time zone"),
-                column("order_state", "varchar", distinct=4),
+                column("order_state", "varchar"),
                 column("grand_total", "numeric"),
             ],
-            fks=[fk("orders", "customer_id", "customers", "id")],
             description="Customer purchase orders",
         ),
         "order_lines": table(
             "order_lines",
             [
-                column("id", "uuid", pk=True),
+                column("id", "uuid"),
                 column("order_id", "uuid"),
                 column("product_id", "uuid"),
                 column("quantity", "integer"),
                 column("line_total", "numeric"),
             ],
-            fks=[
-                fk("order_lines", "order_id", "orders", "id"),
-                fk("order_lines", "product_id", "products", "id"),
-            ],
         ),
-    },
-    indexed_columns=[
-        IndexedColumn(
-            table="products",
-            column="semantic_vector",
-            data_type="vector(384)",
-            extension="vector",
-        )
-    ],
+    }
 )
-ECOMMERCE.tables["products"].embedding_columns = ["semantic_vector"]
 
 HEALTHCARE = SchemaGraph(
     tables={
         "clinicians": table(
             "clinicians",
             [
-                column("id", "uuid", pk=True),
-                column("registration_code", "varchar", distinct=40),
-                column("practitioner_name", "varchar", distinct=40),
-                column("specialty", "varchar", distinct=9),
+                column("id", "uuid"),
+                column("registration_code", "varchar"),
+                column("practitioner_name", "varchar"),
+                column("specialty", "varchar"),
             ],
             description="Licensed practitioners",
         ),
         "patients": table(
             "patients",
             [
-                column("id", "uuid", pk=True),
-                column("mrn", "varchar", distinct=70),
-                column("full_name", "varchar", distinct=70),
+                column("id", "uuid"),
+                column("mrn", "varchar"),
+                column("full_name", "varchar"),
                 column("date_of_birth", "date"),
-                column("enrolment_state", "varchar", distinct=5),
+                column("enrolment_state", "varchar"),
             ],
             description="Individuals under care",
         ),
         "encounters": table(
             "encounters",
             [
-                column("id", "uuid", pk=True),
-                column("encounter_code", "varchar", distinct=200),
+                column("id", "uuid"),
+                column("encounter_code", "varchar"),
                 column("patient_id", "uuid"),
                 column("clinician_id", "uuid"),
                 column("visit_datetime", "timestamp with time zone"),
-                column("visit_status", "varchar", distinct=3),
+                column("visit_status", "varchar"),
                 column("billed_amount", "numeric"),
-            ],
-            fks=[
-                fk("encounters", "patient_id", "patients", "id"),
-                fk("encounters", "clinician_id", "clinicians", "id"),
             ],
             description="Scheduled visits",
         ),
@@ -166,8 +129,8 @@ LIBRARY = SchemaGraph(
         "authors": table(
             "authors",
             [
-                column("id", "uuid", pk=True),
-                column("author_name", "varchar", distinct=300),
+                column("id", "uuid"),
+                column("author_name", "varchar"),
                 column("birth_year", "integer"),
             ],
             description="Book authors",
@@ -175,30 +138,69 @@ LIBRARY = SchemaGraph(
         "titles": table(
             "titles",
             [
-                column("id", "uuid", pk=True),
-                column("accession_code", "varchar", distinct=900),
-                column("headline", "varchar", distinct=900),
+                column("id", "uuid"),
+                column("accession_code", "varchar"),
+                column("headline", "varchar"),
                 column("author_id", "uuid"),
-                column("circulation_status", "varchar", distinct=4),
+                column("circulation_status", "varchar"),
                 column("acquired_on", "date"),
             ],
-            fks=[fk("titles", "author_id", "authors", "id")],
             description="Bibliographic catalogue entries",
         ),
         "loans": table(
             "loans",
             [
-                column("id", "uuid", pk=True),
+                column("id", "uuid"),
                 column("title_id", "uuid"),
                 column("member_id", "uuid"),
                 column("borrowed_at", "timestamp with time zone"),
                 column("returned_at", "timestamp with time zone"),
             ],
-            fks=[fk("loans", "title_id", "titles", "id")],
             description="Items checked out by members",
         ),
     }
 )
+
+
+class FakeEmbedder:
+    """Deterministic stand-in: every text embeds to the same unit vector.
+
+    All scores tie at the maximum, which is enough to exercise the embedding
+    code path without downloading a model.
+    """
+
+    def __init__(self, enabled: bool = True) -> None:
+        self.enabled = enabled
+
+    async def aencode(self, texts):
+        if not self.enabled:
+            raise EmbeddingError("Embeddings are disabled.")
+        return [[1.0, 0.0] for _ in texts]
+
+    async def aclose(self) -> None:
+        return None
+
+
+class FakeDatabase:
+    """A database that never connects; used where the pipeline is bypassed."""
+
+
+@pytest.fixture
+def settings() -> Settings:
+    """Hermetic settings: no .env, no environment, deterministic values."""
+    return Settings(
+        _env_file=None,
+        database_url="postgresql://app:app@localhost:5432/app_test",
+        llm_api_key="test-key",
+        embedding_provider="none",
+        expose_sql=True,
+        log_level="DEBUG",
+    )
+
+
+@pytest.fixture
+def fake_embedder() -> FakeEmbedder:
+    return FakeEmbedder()
 
 
 @pytest.fixture

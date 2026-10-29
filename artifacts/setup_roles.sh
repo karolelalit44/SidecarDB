@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Creates the sandboxed, read-only role the engine connects as.
+#
+# Runs once, inside the PostgreSQL container, during first-time database
+# initialisation. The password arrives as an environment variable so no
+# credential lives in this repository.
+set -euo pipefail
+
+: "${NL_SEARCH_USER:?NL_SEARCH_USER must be set}"
+: "${NL_SEARCH_PASSWORD:?NL_SEARCH_PASSWORD must be set}"
+
+psql -v ON_ERROR_STOP=1 --username "${POSTGRES_USER}" --dbname "${POSTGRES_DB}" <<EOSQL
+DO \$\$
+BEGIN
+    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${NL_SEARCH_USER}') THEN
+        CREATE ROLE ${NL_SEARCH_USER} WITH LOGIN PASSWORD '${NL_SEARCH_PASSWORD}';
+    END IF;
+END
+\$\$;
+
+GRANT CONNECT ON DATABASE ${POSTGRES_DB} TO ${NL_SEARCH_USER};
+GRANT USAGE ON SCHEMA public TO ${NL_SEARCH_USER};
+
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO ${NL_SEARCH_USER};
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO ${NL_SEARCH_USER};
+
+REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON ALL TABLES IN SCHEMA public FROM ${NL_SEARCH_USER};
+ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE INSERT, UPDATE, DELETE, TRUNCATE, REFERENCES, TRIGGER ON TABLES FROM ${NL_SEARCH_USER};
+
+ALTER ROLE ${NL_SEARCH_USER} SET default_transaction_read_only = on;
+ALTER ROLE ${NL_SEARCH_USER} SET statement_timeout = '3000ms';
+ALTER ROLE ${NL_SEARCH_USER} SET idle_in_transaction_session_timeout = '5000ms';
+ALTER ROLE ${NL_SEARCH_USER} SET search_path = public;
+EOSQL

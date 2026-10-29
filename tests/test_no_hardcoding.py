@@ -4,8 +4,8 @@ The engine derives every table, column, filter and join from the live database
 catalog at runtime. That property is easy to state and easy to break by accident
 -- someone adds a ``if "sharma" in q`` special case and genericity silently dies.
 
-This module walks the AST of every source file under ``app/`` and fails if any
-string literal encodes knowledge of a concrete business domain.
+This module walks the AST of every source file under ``src/sidecardb`` and fails
+if any string literal encodes knowledge of a concrete business domain.
 
 Run standalone::
 
@@ -20,10 +20,10 @@ from pathlib import Path
 
 import pytest
 
-APP_ROOT = Path(__file__).resolve().parent.parent / "app"
+APP_ROOT = Path(__file__).resolve().parent.parent / "src" / "sidecardb"
 
 HTTP_STATUS_CODES = frozenset(
-    {200, 201, 204, 400, 401, 403, 404, 409, 422, 429, 500, 502, 503, 504}
+    {200, 201, 204, 400, 401, 403, 404, 409, 413, 422, 429, 500, 502, 503, 504}
 )
 
 # ---------------------------------------------------------------------------
@@ -144,7 +144,7 @@ BANNED_ATTRIBUTES: frozenset[str] = frozenset(
 
 _WORD_LITERAL = re.compile(r"^[a-z]{2,}$")
 
-PERMITTED_NUMBERS = frozenset({-1, 0, 1, 2, 1000}) | HTTP_STATUS_CODES
+PERMITTED_NUMBERS = frozenset({-1, 0, 1, 2, 63, 64, 1000}) | HTTP_STATUS_CODES
 
 QUESTION_NAMES = frozenset({"question", "query", "user_input", "prompt"})
 
@@ -180,7 +180,19 @@ def _word_lists(tree: ast.Module, path: Path) -> set[str]:
     contain underscores or capitals, are not caught by accident.
     """
     findings: set[str] = set()
+    # A typing.Literal subscript declares a type union, not a word table:
+    # Literal["api", "local"] parses as a bare Tuple node, so those slices
+    # are gathered and skipped here.
+    literal_slices = {
+        id(node.slice)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Subscript)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "Literal"
+    }
     for node in ast.walk(tree):
+        if id(node) in literal_slices:
+            continue
         elements = _collection_elements(node)
         if not elements or len(elements) < 2:
             continue
@@ -356,7 +368,7 @@ def test_application_sources_exist() -> None:
 
 
 def test_no_hardcoded_domain_vocabulary_in_app() -> None:
-    """No string literal anywhere in app/ may name a concrete table, column or value."""
+    """No string literal anywhere in the package may name a table, column or value."""
     findings = _all_violations()
     assert not findings, "Hardcoded domain knowledge detected:\n  " + "\n  ".join(findings)
 
@@ -388,10 +400,15 @@ def test_no_magic_numbers_in_app() -> None:
     """Tunable numbers belong in .env, not inline in the runtime.
 
     The allowlist holds only positions and unit conversions, which carry no
-    policy: indexing offsets, a rounding pair, and milliseconds per second.
+    policy: indexing offsets, a rounding pair, the PostgreSQL identifier cap,
+    the request-id length cap, and milliseconds per second. config.py is
+    skipped: its field defaults are the code form of .env.example, which is
+    exactly where tunables are supposed to live.
     """
     findings: set[str] = set()
     for path in _iter_source_files():
+        if path.name == "config.py":
+            continue
         tree = _parse(path)
         if tree is None:
             continue
@@ -439,22 +456,21 @@ def test_no_scenario_branching_on_the_question() -> None:
     assert not findings, "Scenario branching detected:\n  " + "\n  ".join(sorted(findings))
 
 
-def test_every_setting_is_declared_without_a_default() -> None:
-    """.env is the only source of configuration, so no field may carry one."""
-    from pydantic.fields import PydanticUndefined
+def test_only_the_two_credentials_are_required() -> None:
+    """.env used to be mandatory for every knob; now just two values are.
 
-    from app.config import Settings
+    Everything else carries a Python default, so a working configuration is
+    two keyword arguments long. Defaults are policy, not hardcoding: they live
+    in config.py, which is the code form of .env.example.
+    """
+    from sidecardb.config import Settings
 
-    offenders = [
-        name
-        for name, field in Settings.model_fields.items()
-        if field.default is not PydanticUndefined or field.default_factory is not None
-    ]
-    assert not offenders, f"settings with a Python default: {sorted(offenders)}"
+    required = {name for name, field in Settings.model_fields.items() if field.is_required()}
+    assert required == {"database_url", "llm_api_key"}
 
 
 def test_runtime_constants_are_referenced_not_repeated() -> None:
-    """The SQL operator set must have exactly one home in app/.
+    """The SQL operator set must have exactly one home in the package.
 
     It is used both to validate a plan and to describe the contract to the
     model. Written twice, the two copies drift and the model is told to use
@@ -658,10 +674,10 @@ def test_magic_number_guard_permits_the_allowlist(source: str) -> None:
 @pytest.mark.parametrize(
     "module_path",
     [
-        "app/render.py",
-        "app/guard.py",
-        "app/graph.py",
-        "app/service.py",
+        "sidecardb/render.py",
+        "sidecardb/guard.py",
+        "sidecardb/graph.py",
+        "sidecardb/service.py",
     ],
 )
 def test_core_modules_do_not_import_a_domain(module_path: str) -> None:

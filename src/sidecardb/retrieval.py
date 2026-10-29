@@ -1,14 +1,23 @@
-from .config import settings
-from .embeddings import EmbeddingError, dot, embedder
+import time
+from typing import TYPE_CHECKING
+
+from .exceptions import EmbeddingError
 from .logging_config import get_logger
 from .types import Hit, SchemaGraph, TableInfo
+
+if TYPE_CHECKING:
+    from .config import Settings
+    from .embeddings import Embedder
 
 logger = get_logger("retrieval")
 
 
 class SchemaIndex:
-    def __init__(self) -> None:
-        self._graph: SchemaGraph | None = None
+    """Ranks catalog tables and columns against an incoming question."""
+
+    def __init__(self, embedder: "Embedder", settings: "Settings") -> None:
+        self._embedder = embedder
+        self._settings = settings
         self._keys: list[str] = []
         self._texts: list[str] = []
         self._vectors: list[list[float]] | None = None
@@ -34,16 +43,20 @@ class SchemaIndex:
                 texts.append(_describe_column(table, column))
                 table_of[key] = table.name
 
-        self._graph = graph
         self._keys, self._texts, self._table_of = keys, texts, table_of
         self._vectors = None
 
-        if not embedder.enabled:
+        if not self._embedder.enabled:
             logger.info("Embeddings disabled; schema index will report unavailable")
             return self
 
+        logger.debug(
+            "retrieval: embedding %d schema elements for %d tables",
+            len(texts),
+            len(graph.tables),
+        )
         try:
-            self._vectors = await embedder.aencode(texts)
+            self._vectors = await self._embedder.aencode(texts)
             logger.info("Schema index built over %d elements", len(texts))
         except EmbeddingError as exc:
             logger.warning("Schema index unavailable: %s", exc)
@@ -52,15 +65,17 @@ class SchemaIndex:
 
     async def search(self, question: str, top_k: int) -> list[Hit]:
         if self._vectors is None:
+            logger.debug("retrieval: the index holds no vectors; search is unavailable")
             return []
 
+        started = time.perf_counter()
         try:
-            query_vector = (await embedder.aencode([question]))[0]
+            query_vector = (await self._embedder.aencode([question]))[0]
         except EmbeddingError as exc:
             logger.warning("Query embedding failed: %s", exc)
             return []
 
-        precision = settings.retrieval_score_precision
+        precision = self._settings.retrieval_score_precision
         hits = [
             Hit(
                 table=self._table_of[key],
@@ -70,28 +85,39 @@ class SchemaIndex:
             for key, vector in zip(self._keys, self._vectors, strict=True)
         ]
         hits.sort(key=lambda hit: hit.score, reverse=True)
-        return hits[:top_k]
+        top = hits[:top_k]
+        logger.debug(
+            "retrieval: scored %d elements in %d ms; kept the top %d at %s",
+            len(hits),
+            int((time.perf_counter() - started) * 1000),
+            len(top),
+            ", ".join(f"{hit.subject}={hit.score}" for hit in top),
+        )
+        return top
 
     async def tables_for(self, question: str, limit: int, min_score: float) -> list[str]:
         best: dict[str, float] = {}
-        for hit in await self.search(question, settings.retrieval_top_k):
+        for hit in await self.search(question, self._settings.retrieval_top_k):
             if hit.score < min_score:
                 continue
             if hit.table not in best or hit.score > best[hit.table]:
                 best[hit.table] = hit.score
 
         ordered = sorted(best.items(), key=lambda pair: pair[1], reverse=True)
-        return [name for name, _score in ordered[:limit]]
+        chosen = ordered[:limit]
+        logger.debug(
+            "retrieval: %d table(s) at or above %s, limited to %d: %s",
+            len(ordered),
+            min_score,
+            limit,
+            ", ".join(f"{name}={score}" for name, score in chosen),
+        )
+        return [name for name, _score in chosen]
 
-    async def columns_for(self, question: str, min_score: float) -> dict[str, float]:
-        """Return similarity scores for columns above the threshold."""
-        scored: dict[str, float] = {}
-        for hit in await self.search(question, settings.retrieval_top_k):
-            if hit.score < min_score or "." not in hit.subject:
-                continue
-            table, column = hit.subject.rsplit(".", 1)
-            scored[f"{table}.{column}"] = hit.score
-        return scored
+
+def dot(a: list[float], b: list[float]) -> float:
+    """Both operands are unit vectors, so cosine is the dot product."""
+    return sum(x * y for x, y in zip(a, b, strict=True))
 
 
 def _words(name: str) -> str:
@@ -102,7 +128,7 @@ def _describe_table(table: TableInfo) -> str:
     parts = [_words(table.name)]
     if table.description:
         parts.append(table.description)
-    parts.extend(_words(c.name) for c in table.columns if not c.primary_key)
+    parts.extend(_words(c.name) for c in table.columns)
     return " | ".join(parts)
 
 

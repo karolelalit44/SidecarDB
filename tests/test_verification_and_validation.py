@@ -3,11 +3,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from app.config import settings
-from app.exceptions import ConfigurationError
-from app.main import app
-from app.service import validate_query
-from app.verification import StartupVerificationService
+from sidecardb import SidecarDB
+from sidecardb.config import Settings
+from sidecardb.exceptions import ConfigurationError
+from sidecardb.server import create_app
+from sidecardb.service import validate_query
+from sidecardb.verification import StartupVerificationService
 
 
 def test_validate_query_permits_natural_language():
@@ -47,36 +48,52 @@ def test_validate_query_rejects_risky_inputs():
         assert reason is not None
 
 
-@pytest.mark.asyncio
-async def test_verification_service_fails_when_db_ping_fails():
-    verifier = StartupVerificationService()
-    with (
-        patch("app.db.database.connect", new_callable=AsyncMock),
-        patch("app.db.database.ping", new_callable=AsyncMock, return_value=False),
-        pytest.raises(ConfigurationError, match="Database ping failed"),
-    ):
-        await verifier.verify_database()
+def offline_settings(**overrides) -> Settings:
+    """Settings that cannot reach a database, and do not retry slowly."""
+    base = {
+        "_env_file": None,
+        "database_url": "postgresql://app:app@127.0.0.1:1/app",
+        "llm_api_key": "test-key",
+        "embedding_provider": "none",
+        "db_connect_retries": 0,
+        "recovery_interval_seconds": 600.0,
+    }
+    base.update(overrides)
+    return Settings(**base)
 
 
-@pytest.mark.asyncio
-async def test_verification_service_fails_when_llm_key_missing(monkeypatch):
-    verifier = StartupVerificationService()
-    monkeypatch.setattr(settings, "llm_api_key", "")
+def test_verification_service_fails_when_the_url_is_missing():
+    verifier = StartupVerificationService(offline_settings(database_url=""))
+    with pytest.raises(ConfigurationError, match="DATABASE_URL"):
+        verifier.verify_database()
+
+
+def test_verification_service_never_touches_the_database():
+    """Verification reads configuration; the connection belongs elsewhere."""
+    verifier = StartupVerificationService(offline_settings())
+    with patch("sidecardb.db.Database.connect", new_callable=AsyncMock) as connect:
+        verifier.verify()
+    connect.assert_not_called()
+
+
+def test_verification_service_fails_when_llm_key_missing():
+    verifier = StartupVerificationService(offline_settings(llm_api_key=""))
     with pytest.raises(ConfigurationError, match="LLM_API_KEY"):
-        await verifier.verify_llm()
+        verifier.verify_llm()
 
 
-@pytest.mark.asyncio
-async def test_verification_service_embeddings_optional_does_not_raise(monkeypatch):
-    verifier = StartupVerificationService()
-    monkeypatch.setattr(settings, "embedding_enabled", False)
-    # Should complete without raising
-    await verifier.verify_embeddings()
+def test_verification_service_embeddings_off_does_not_raise():
+    verifier = StartupVerificationService(offline_settings(embedding_provider="none"))
+    verifier.verify_embeddings()
+
+
+def client_for(settings: Settings) -> TestClient:
+    return TestClient(create_app(SidecarDB(settings=settings)), raise_server_exceptions=False)
 
 
 def test_search_endpoint_handles_query_error():
-    client = TestClient(app, raise_server_exceptions=False)
-    # Question too short -> QueryError -> 400 status code
+    client = client_for(offline_settings())
+    # Question too short -> QueryError -> 400 status code, before any DB touch.
     response = client.post("/api/v1/search", json={"query": "x"})
     assert response.status_code == 400
     data = response.json()
@@ -85,7 +102,7 @@ def test_search_endpoint_handles_query_error():
 
 
 def test_search_endpoint_handles_risky_query():
-    client = TestClient(app, raise_server_exceptions=False)
+    client = client_for(offline_settings())
     response = client.post("/api/v1/search", json={"query": "orders; drop table users"})
     assert response.status_code == 400
     data = response.json()
@@ -94,10 +111,19 @@ def test_search_endpoint_handles_risky_query():
 
 
 def test_search_endpoint_handles_query_too_long():
-    client = TestClient(app, raise_server_exceptions=False)
-    response = client.post("/api/v1/search", json={"query": "a" * (settings.max_query_length + 1)})
+    settings = offline_settings(max_query_length=10)
+    client = client_for(settings)
+    response = client.post("/api/v1/search", json={"query": "a" * 11})
     assert response.status_code == 400
     data = response.json()
     assert data["error"] == "QueryError"
     assert "too long" in data["message"].lower()
     assert str(settings.max_query_length) in data["message"]
+
+
+def test_search_route_is_exposed():
+    client = client_for(offline_settings())
+    paths = [route.path for route in client.app.routes]
+    assert "/api/v1/search" in paths
+    assert "/api/v1/schema" in paths
+    assert "/health" in paths
