@@ -3,8 +3,6 @@ from typing import Annotated, Any, Final, Literal
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-from utils.text import split_csv
-
 PROVIDER_API: Final = "api"
 PROVIDER_LOCAL: Final = "local"
 PROVIDER_NONE: Final = "none"
@@ -43,7 +41,7 @@ class Settings(BaseSettings):
     @classmethod
     def _split_csv(cls, value: object) -> object:
         if isinstance(value, str):
-            return split_csv(value)
+            return [item.strip() for item in value.split(",") if item.strip()]
         return value
 
     @field_validator("llm_extra_body", mode="before")

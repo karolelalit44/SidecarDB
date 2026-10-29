@@ -39,7 +39,7 @@ JOIN LATERAL (
     WHERE rt.oid = a.atttypid
 ) base ON true
 WHERE n.nspname = $1
-  AND c.relkind = 'r'
+  AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
   AND a.attnum > 0
   AND NOT a.attisdropped
 ORDER BY c.relname, a.attnum
@@ -51,7 +51,7 @@ SELECT c.relname AS name,
        c.reltuples AS row_estimate
 FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = $1 AND c.relkind = 'r'
+WHERE n.nspname = $1 AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
 ORDER BY c.relname
 """
 
@@ -60,6 +60,7 @@ class Database:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._pool = None
+        self._lock = asyncio.Lock()
 
     @property
     def connected(self) -> bool:
@@ -76,33 +77,40 @@ class Database:
             logger.debug("db: pool already open; reusing it")
             return
 
-        attempts = DB_CONNECT_RETRIES if retries is None else retries
-        delay = DB_CONNECT_BACKOFF_SECONDS
-        last_error: Exception | None = None
-
-        for attempt in range(attempts + 1):
-            try:
-                await self._open_pool(readonly)
+        async with self._lock:
+            if self.connected:
+                logger.debug("db: pool already open; reusing it")
                 return
-            except Exception as exc:
-                last_error = exc
-                if attempt >= attempts:
-                    break
-                logger.warning(
-                    "db: connect attempt %d of %d failed: %s: %s; retrying in %.1fs",
-                    attempt + 1,
-                    attempts + 1,
-                    type(exc).__name__,
-                    exc,
-                    delay,
-                )
-                await asyncio.sleep(delay)
-                delay *= _BACKOFF_FACTOR
 
-        logger.error(
-            "db: the pool could not be opened: %s: %s", type(last_error).__name__, last_error
-        )
-        raise ConfigurationError(f"Database could not be reached ({last_error}).") from last_error
+            attempts = DB_CONNECT_RETRIES if retries is None else retries
+            delay = DB_CONNECT_BACKOFF_SECONDS
+            last_error: Exception | None = None
+
+            for attempt in range(attempts + 1):
+                try:
+                    await self._open_pool(readonly)
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    if attempt >= attempts:
+                        break
+                    logger.warning(
+                        "db: connect attempt %d of %d failed: %s: %s; retrying in %.1fs",
+                        attempt + 1,
+                        attempts + 1,
+                        type(exc).__name__,
+                        exc,
+                        delay,
+                    )
+                    await asyncio.sleep(delay)
+                    delay *= _BACKOFF_FACTOR
+
+            logger.error(
+                "db: the pool could not be opened: %s: %s", type(last_error).__name__, last_error
+            )
+            raise ConfigurationError(
+                f"Database could not be reached ({last_error})."
+            ) from last_error
 
     async def _open_pool(self, readonly: bool) -> None:
         import asyncpg
@@ -151,10 +159,11 @@ class Database:
         await self.connect()
 
     async def close(self) -> None:
-        if self._pool is not None:
-            logger.debug("db: closing the connection pool")
-            await self._pool.close()
-        self._pool = None
+        async with self._lock:
+            if self._pool is not None:
+                logger.debug("db: closing the connection pool")
+                await self._pool.close()
+                self._pool = None
 
     async def introspect(self) -> SchemaGraph:
         await self.ensure_connected()

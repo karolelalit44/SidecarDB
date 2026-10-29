@@ -19,7 +19,6 @@ from core.constants import (
     RETRIEVAL_SCORE_PRECISION,
     RETRIEVAL_TOP_K,
 )
-from utils.text import split_csv
 
 if TYPE_CHECKING:
     from core.retrieval import RetrievalMode
@@ -68,7 +67,7 @@ class Plan(BaseModel):
         if isinstance(value, str):
             if not value.strip():
                 return []
-            return split_csv(value)
+            return [item.strip() for item in value.split(",") if item.strip()]
         return value
 
     @field_validator("order_by", mode="before")

@@ -89,7 +89,11 @@ def _compose(plan: "Plan", graph: "SchemaGraph") -> tuple[str, tuple[str, ...]]:
         direction = "DESC" if plan.descending else "ASC"
         order = f" ORDER BY {quote(plan.order_by)} {direction}"
     sql = f"SELECT {_projection(plan, graph)} FROM {quote(plan.table)}"
-    sql += _where(plan, binder) + group + order
+    sql += _where(plan, binder, graph) + group + order
+    if plan.intent is not QueryIntent.count and not (
+        plan.intent in MEASURED_INTENTS and not plan.group_by
+    ):
+        sql += f" LIMIT {DEFAULT_LIMIT}"
     return sql, tuple(binder.params)
 
 
@@ -120,7 +124,7 @@ def _projection(plan: "Plan", graph: "SchemaGraph") -> str:
     return ", ".join(quote(column.name) for column in table.columns)
 
 
-def _where(plan: "Plan", binder: "_Binder") -> str:
+def _where(plan: "Plan", binder: "_Binder", graph: "SchemaGraph | None" = None) -> str:
     clauses: list[str] = []
 
     if plan.filter_column:
@@ -137,7 +141,15 @@ def _where(plan: "Plan", binder: "_Binder") -> str:
         elif operator in PATTERN_OPERATORS:
             clauses.append(f"{column} {operator} {binder.bind(like_pattern(plan.filter_value))}")
         else:
-            clauses.append(f"{column} {operator} {binder.bind(plan.filter_value)}")
+            cast_type = ""
+            if graph and plan.table in graph.tables:
+                col = next(
+                    (c for c in graph.tables[plan.table].columns if c.name == plan.filter_column),
+                    None,
+                )
+                if col and col.data_type and col.data_type.lower() != "text":
+                    cast_type = f"::{col.data_type}"
+            clauses.append(f"{column} {operator} {binder.bind(plan.filter_value)}{cast_type}")
 
     if plan.text_search_query and plan.text_search_columns:
         pattern = binder.bind(like_pattern(plan.text_search_query))
@@ -190,22 +202,20 @@ def validate(sql: str, graph: "SchemaGraph | None", schema: str) -> Statement:
                 f"Statement calls a function outside the plan vocabulary: {function}."
             )
 
-    if graph and graph.tables:
-        known = {name.lower() for name in graph.tables}
-        local = {c.alias_or_name.lower() for c in tree.find_all(exp.CTE) if c.alias_or_name}
-        schema_name = schema.lower()
-        logger.debug("guard: checking every table reference against %d catalog tables", len(known))
-        for table in tree.find_all(exp.Table):
-            if table.catalog:
-                logger.debug("guard: rejected; %s names another database", table.sql())
-                raise SecurityError("Statement references a table outside the configured schema.")
-            if table.db and table.db.lower() != schema_name:
-                logger.debug("guard: rejected; %s names a schema outside the catalog", table.sql())
-                raise SecurityError("Statement references a table outside the configured schema.")
-            name = table.name.lower()
-            if name and name not in known and name not in local:
-                logger.debug("guard: rejected; it reads the unknown table %s", name)
-                raise SecurityError("Statement references a table outside the catalog.")
+    known = {name.lower() for name in graph.tables} if graph and graph.tables else None
+    local = {c.alias_or_name.lower() for c in tree.find_all(exp.CTE) if c.alias_or_name}
+    schema_name = schema.lower() if schema else ""
+    for table in tree.find_all(exp.Table):
+        if table.catalog:
+            logger.debug("guard: rejected; %s names another database", table.sql())
+            raise SecurityError("Statement references a table outside the configured schema.")
+        if schema_name and table.db and table.db.lower() != schema_name:
+            logger.debug("guard: rejected; %s names a schema outside the catalog", table.sql())
+            raise SecurityError("Statement references a table outside the configured schema.")
+        name = table.name.lower()
+        if known is not None and name and name not in known and name not in local:
+            logger.debug("guard: rejected; it reads the unknown table %s", name)
+            raise SecurityError("Statement references a table outside the catalog.")
 
     limit = tree.find(exp.Limit)
     rewritten = False

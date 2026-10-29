@@ -4,6 +4,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from unicodedata import category
 
 from core.answer import bind_template
 from core.capabilities import Catalog, Embedder, Planner, Runner
@@ -30,7 +31,6 @@ from core.plan import Outcome, Plan, PlanPolicy
 from core.planning import PlanRequest
 from core.planning import make_plan as plan_a_question
 from core.retrieval import SchemaIndex, link
-from core.screening import check_question
 from core.wire import (
     DATABASE_DOWN,
     DATABASE_UP,
@@ -59,6 +59,11 @@ def _detect_version() -> str:
         return version("sidecardb")
     except PackageNotFoundError:
         return "0+local"
+
+
+_DISALLOWED_SUBSTRINGS = ("--", "/*", "*/", ";", "\0")
+_ALLOWED_CONTROL = ("\t", "\n", "\r")
+_BLOCKED_CATEGORIES = ("Cc", "Cf", "Cs")
 
 
 class SidecarDB:
@@ -205,9 +210,7 @@ class SidecarDB:
             return
         self._started = False
         if self._owns_catalog:
-            catalog = self._catalog
-            if isinstance(catalog, Database):
-                await catalog.close()
+            await self._catalog.close()
         if self._owns_embedder:
             await self.embedder.aclose()
         self._graph = None
@@ -252,14 +255,25 @@ class SidecarDB:
         return self._respond(outcome, question, request_id, started)
 
     def _reject_question(self, question: str) -> str | None:
-        if len(question) < MIN_QUESTION_LENGTH:
+        if not question or len(question) < MIN_QUESTION_LENGTH:
             return "The question is too short."
         if len(question) > MAX_QUESTION_LENGTH:
             return f"The question is too long (maximum {MAX_QUESTION_LENGTH} characters)."
-        problem = check_question(question)
-        if problem:
-            logger.warning("Rejected a %d-character question: %s", len(question), problem)
-            return problem
+        for marker in _DISALLOWED_SUBSTRINGS:
+            if marker in question:
+                logger.warning(
+                    "Rejected a %d-character question: disallowed symbols", len(question)
+                )
+                return "The question contains disallowed symbols or comment characters."
+        for ch in question:
+            if ch in _ALLOWED_CONTROL:
+                continue
+            if category(ch) in _BLOCKED_CATEGORIES:
+                logger.warning("Rejected question: unsupported control characters")
+                return "The question contains unsupported control or formatting characters."
+        if not any(ch.isalnum() for ch in question):
+            logger.warning("Rejected question: no alphanumeric character")
+            return "The question must contain at least one alphanumeric character."
         return None
 
     async def _run_pipeline(self, question: str, graph: SchemaGraph) -> Outcome:

@@ -2,7 +2,7 @@ import json
 import secrets
 import time
 import uuid
-from collections import defaultdict, deque
+from collections import deque
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
@@ -54,16 +54,25 @@ class RateLimiter:
     def __init__(self, limit: int, window_seconds: float) -> None:
         self._limit = limit
         self._window = window_seconds
-        self._hits: dict[str, deque[float]] = defaultdict(deque)
+        self._hits: dict[str, deque[float]] = {}
 
     def allow(self, key: str) -> bool:
         now = time.monotonic()
-        window = self._hits[key]
         cutoff = now - self._window
-        while window and window[0] <= cutoff:
-            window.popleft()
-        if len(window) >= self._limit:
+        window = self._hits.get(key)
+        if window is not None:
+            while window and window[0] <= cutoff:
+                window.popleft()
+            if not window:
+                del self._hits[key]
+                window = None
+
+        if window is not None and len(window) >= self._limit:
             return False
+
+        if window is None:
+            window = deque()
+            self._hits[key] = window
         window.append(now)
         return True
 
