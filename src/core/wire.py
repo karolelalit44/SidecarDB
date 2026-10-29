@@ -2,15 +2,6 @@ from pydantic import BaseModel, Field
 
 from core.retrieval import RetrievalMode
 
-AUTHORIZATION_HEADER = "Authorization"
-BEARER_PREFIX = "bearer "
-
-STATUS_OK = "ok"
-STATUS_DEGRADED = "degraded"
-DATABASE_UP = "connected"
-DATABASE_DOWN = "unavailable"
-EMBEDDING_OFF = "disabled"
-
 
 class SearchRequest(BaseModel):
     question: str
@@ -39,13 +30,6 @@ class HealthResponse(BaseModel):
 
 
 __all__ = [
-    "AUTHORIZATION_HEADER",
-    "BEARER_PREFIX",
-    "DATABASE_DOWN",
-    "DATABASE_UP",
-    "EMBEDDING_OFF",
-    "STATUS_DEGRADED",
-    "STATUS_OK",
     "HealthResponse",
     "SearchRequest",
     "SearchResponse",

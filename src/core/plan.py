@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
 
 class QueryIntent(StrEnum):
-    count = "count"  # type: ignore[assignment]
+    count = "count"
     aggregate = "aggregate"
     retrieve = "retrieve"
     distinct = "distinct"
@@ -36,7 +36,7 @@ class MeasureFunction(StrEnum):
     avg = "avg"
     min = "min"
     max = "max"
-    count = "count"  # type: ignore[assignment]
+    count = "count"
 
     @property
     def needs_column(self) -> bool:
@@ -110,30 +110,7 @@ class Outcome:
     retrieval_mode: "RetrievalMode"
 
 
-COMPARISON_OPERATORS = ("=", "!=", "<>", "<", "<=", ">", ">=")
-PATTERN_OPERATORS = ("LIKE", "ILIKE")
-NULL_TESTS = ("IS NULL", "IS NOT NULL")
-OPERATORS = (*COMPARISON_OPERATORS, *PATTERN_OPERATORS, *NULL_TESTS)
-
-DEFAULT_COMPARISON = COMPARISON_OPERATORS[0]
-
-COUNT_ALIAS = "record_count"
-
-WILDCARD = "*"
-
-SCALAR_INTENTS = frozenset((QueryIntent.count, QueryIntent.aggregate))
-MEASURED_INTENTS = frozenset((QueryIntent.aggregate,))
-
 __all__ = [
-    "COMPARISON_OPERATORS",
-    "COUNT_ALIAS",
-    "DEFAULT_COMPARISON",
-    "MEASURED_INTENTS",
-    "NULL_TESTS",
-    "OPERATORS",
-    "PATTERN_OPERATORS",
-    "SCALAR_INTENTS",
-    "WILDCARD",
     "MeasureFunction",
     "Outcome",
     "Plan",

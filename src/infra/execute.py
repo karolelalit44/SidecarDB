@@ -7,6 +7,8 @@ from core.constants import (
     LOG_SQL,
     MS_PER_SECOND,
     REDACT_CATALOG_IN_ERRORS,
+    REDACTED_BY_SQLSTATE,
+    REDACTED_BY_SQLSTATE_CLASS,
     SANDBOX_APP_TIMEOUT_SECONDS,
     SANDBOX_MAX_ROWS,
     SANDBOX_STATEMENT_TIMEOUT_SECONDS,
@@ -21,14 +23,6 @@ if TYPE_CHECKING:
     from infra.db import Database
 
 logger = get_logger("execute")
-
-REDACTED_BY_SQLSTATE = {
-    "42501": "the database denied the statement access to an object",
-    "57014": "the statement exceeded the database's execution budget",
-}
-REDACTED_BY_SQLSTATE_CLASS = {
-    "42": "the statement named an object the database does not provide",
-}
 
 
 class Sandbox:

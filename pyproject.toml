@@ -83,3 +83,7 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = ["infra.llm", "infra.db", "infra.embeddings"]
 disallow_untyped_defs = false
+
+[[tool.mypy.overrides]]
+module = "core.plan"
+disable_error_code = ["assignment"]

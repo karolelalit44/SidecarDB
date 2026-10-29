@@ -1,11 +1,12 @@
-from typing import Annotated, Any, Final, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
-PROVIDER_API: Final = "api"
-PROVIDER_LOCAL: Final = "local"
-PROVIDER_NONE: Final = "none"
+from core.constants import (
+    DEFAULT_SCHEMA,
+    PROVIDER_API,
+)
 
 CsvList = Annotated[list[str], NoDecode]
 
@@ -18,17 +19,19 @@ class Settings(BaseSettings):
         case_sensitive=False,
     )
 
-    database_url: str
-    db_schema: str = "public"
+    database_url: str = ""
+    db_schema: str = DEFAULT_SCHEMA
     db_ssl: str = ""
+    db_password: str = ""
+    db_role: str = ""
 
-    llm_api_key: str
-    llm_base_url: str = "https://api.openai.com/v1"
-    llm_model: str = "gpt-4o-mini"
+    llm_api_key: str = ""
+    llm_base_url: str = ""
+    llm_model: str = ""
     llm_extra_body: dict[str, Any] = {}
 
-    embedding_provider: Literal["api", "local", "none"] = "api"
-    embedding_model: str = "text-embedding-3-small"
+    embedding_provider: Literal["api", "local", "none"] = PROVIDER_API
+    embedding_model: str = ""
     embedding_api_base_url: str = ""
     embedding_api_key: str = ""
     embedding_dimensions: int = 1536

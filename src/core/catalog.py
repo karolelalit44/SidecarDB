@@ -2,8 +2,7 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
 
-TYPE_CATEGORY_NUMERIC = "N"
-TYPE_CATEGORY_UNKNOWN = "X"
+from core.constants import TYPE_CATEGORY_NUMERIC, TYPE_CATEGORY_UNKNOWN
 
 
 class ColumnInfo(BaseModel):
@@ -78,8 +77,6 @@ class SchemaGraph(BaseModel):
 
 
 __all__ = [
-    "TYPE_CATEGORY_NUMERIC",
-    "TYPE_CATEGORY_UNKNOWN",
     "ColumnInfo",
     "SchemaGraph",
     "TableInfo",

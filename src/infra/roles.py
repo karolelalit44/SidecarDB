@@ -1,5 +1,5 @@
 from core.constants import (
-    DEFAULT_ROLE_NAME,
+    DEFAULT_SCHEMA,
     ROLE_IDLE_IN_TRANSACTION_TIMEOUT_MS,
     ROLE_STATEMENT_TIMEOUT_MS,
 )
@@ -61,12 +61,14 @@ def _provision_statements(role: str, password: str, schema: str, database: str) 
 
 async def create_read_only_role(
     admin_dsn: str,
-    role: str = DEFAULT_ROLE_NAME,
+    role: str = "",
     password: str = "",
-    schema: str = "public",
+    schema: str = DEFAULT_SCHEMA,
 ) -> None:
     if not admin_dsn:
         raise ConfigurationError("An admin DSN is required to provision the read-only role.")
+    if not role:
+        raise ConfigurationError("A role name is required for the read-only role.")
     if not password:
         raise ConfigurationError("A password is required for the read-only role.")
     _validated_identifier(role, "The role name")

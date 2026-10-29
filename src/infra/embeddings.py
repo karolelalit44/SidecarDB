@@ -6,19 +6,22 @@ from pathlib import Path
 
 import httpx
 
-from core.config import PROVIDER_API, PROVIDER_LOCAL, PROVIDER_NONE, Settings
-from core.constants import EMBEDDING_BATCH_SIZE, LLM_TIMEOUT_SECONDS
+from core.config import Settings
+from core.constants import (
+    AUTHORIZATION_HEADER,
+    BEARER_PREFIX,
+    EMBEDDING_BATCH_SIZE,
+    LLM_TIMEOUT_SECONDS,
+    PRELOAD_COMMAND,
+    PROVIDER_API,
+    PROVIDER_LOCAL,
+    PROVIDER_NONE,
+)
 from core.exceptions import ConfigurationError, EmbeddingError
-from core.wire import AUTHORIZATION_HEADER, BEARER_PREFIX
 from utils.logging_config import get_logger
 
 logger = get_logger("embeddings")
 _backend_lock = threading.Lock()
-
-PRELOAD_COMMAND = (
-    'python -c "from sentence_transformers import SentenceTransformer; '
-    "SentenceTransformer('{model}')\""
-)
 
 
 def _normalise(vector: list[float]) -> list[float]:
@@ -30,9 +33,13 @@ def _normalise(vector: list[float]) -> list[float]:
 
 class _ApiBackend:
     def __init__(self, settings: Settings) -> None:
-        base = (settings.embedding_api_base_url or settings.llm_base_url).rstrip("/")
+        if not settings.embedding_api_base_url:
+            raise ConfigurationError("EMBEDDING_API_BASE_URL is not configured.")
+        if not settings.embedding_model:
+            raise ConfigurationError("EMBEDDING_MODEL is not configured.")
+        base = settings.embedding_api_base_url.rstrip("/")
         self._url = f"{base}/embeddings"
-        self._key = settings.embedding_api_key or settings.llm_api_key
+        self._key = settings.embedding_api_key
         self._model = settings.embedding_model
         self._client = httpx.AsyncClient(timeout=LLM_TIMEOUT_SECONDS)
 
@@ -69,6 +76,8 @@ class _LocalBackend:
             ) from exc
 
         source, is_local = resolve_model_source(settings)
+        if not source:
+            raise ConfigurationError("EMBEDDING_MODEL is not configured.")
         if is_local:
             logger.info("embeddings: loading the model from the local path %s", source)
         else:
@@ -96,9 +105,14 @@ class _LocalBackend:
 
 def resolve_model_source(settings: Settings) -> tuple[str, bool]:
     local = settings.embedding_local_path.strip()
-    if local and Path(local).is_dir():
-        return local, True
     if local:
+        candidate = Path(local)
+        if candidate.is_dir():
+            return str(candidate), True
+        for prefix in (Path("usage"), Path("sidecardb")):
+            prefixed = prefix / local
+            if prefixed.is_dir():
+                return str(prefixed), True
         logger.warning(
             "embeddings: EMBEDDING_LOCAL_PATH %s is not a directory; "
             "falling back to the model id %s",

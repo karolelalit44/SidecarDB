@@ -14,22 +14,27 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from core.catalog import SchemaGraph
 from core.constants import (
+    API_KEY_HEADER,
     APP_NAME,
+    AUTHORIZATION_HEADER,
+    BEARER_PREFIX,
     CORS_ALLOW_CREDENTIALS,
     CORS_ALLOW_HEADERS,
     CORS_ALLOW_METHODS,
     CORS_ALLOW_ORIGINS,
     ELAPSED_PRECISION,
     MAX_REQUEST_BODY_BYTES,
+    PROTECTED_PREFIX,
     RATE_LIMIT_ENABLED,
     RATE_LIMIT_REQUESTS,
     RATE_LIMIT_WINDOW_SECONDS,
+    REQUEST_ID_HEADER,
+    REQUEST_ID_MAX_LENGTH,
+    RETRY_AFTER_HEADER,
+    STATUS_OK,
 )
 from core.exceptions import SearchError
 from core.wire import (
-    AUTHORIZATION_HEADER,
-    BEARER_PREFIX,
-    STATUS_OK,
     HealthResponse,
     SearchRequest,
     SearchResponse,
@@ -41,13 +46,6 @@ if TYPE_CHECKING:
 
 logger = get_logger("api")
 error_logger = get_logger("error")
-
-PROTECTED_PREFIX = "/api/v1"
-
-REQUEST_ID_HEADER = "X-Request-ID"
-API_KEY_HEADER = "X-API-Key"
-RETRY_AFTER_HEADER = "Retry-After"
-REQUEST_ID_MAX_LENGTH = 64
 
 
 class RateLimiter:

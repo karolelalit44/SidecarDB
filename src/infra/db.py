@@ -4,6 +4,8 @@ import time
 from core.catalog import SchemaGraph, TableInfo
 from core.config import Settings
 from core.constants import (
+    COLUMNS_SQL,
+    DB_BACKOFF_FACTOR,
     DB_CONNECT_BACKOFF_SECONDS,
     DB_CONNECT_RETRIES,
     DB_MAX_INACTIVE_CONNECTION_LIFETIME,
@@ -13,47 +15,13 @@ from core.constants import (
     POOL_MIN_SIZE,
     SANDBOX_IDLE_TIMEOUT_MS,
     SANDBOX_STATEMENT_TIMEOUT_SECONDS,
+    TABLES_SQL,
 )
 from core.exceptions import CatalogError, ConfigurationError
 from utils.logging_config import get_logger
 from utils.sql import quote_literal
 
 logger = get_logger("db")
-
-_BACKOFF_FACTOR = 2
-
-_COLUMNS_SQL = """
-SELECT c.relname AS table_name,
-       a.attname AS name,
-       format_type(a.atttypid, a.atttypmod) AS data_type,
-       base.typcategory AS type_category,
-       NOT a.attnotnull AS nullable,
-       col_description(c.oid, a.attnum) AS description
-FROM pg_attribute a
-JOIN pg_class c ON c.oid = a.attrelid
-JOIN pg_namespace n ON n.oid = c.relnamespace
-JOIN LATERAL (
-    SELECT bt.typcategory
-    FROM pg_type rt
-    JOIN pg_type bt ON bt.oid = COALESCE(NULLIF(rt.typbasetype, 0), rt.oid)
-    WHERE rt.oid = a.atttypid
-) base ON true
-WHERE n.nspname = $1
-  AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
-  AND a.attnum > 0
-  AND NOT a.attisdropped
-ORDER BY c.relname, a.attnum
-"""
-
-_TABLES_SQL = """
-SELECT c.relname AS name,
-       obj_description(c.oid, 'pg_class') AS description,
-       c.reltuples AS row_estimate
-FROM pg_class c
-JOIN pg_namespace n ON n.oid = c.relnamespace
-WHERE n.nspname = $1 AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
-ORDER BY c.relname
-"""
 
 
 class Database:
@@ -103,7 +71,7 @@ class Database:
                         delay,
                     )
                     await asyncio.sleep(delay)
-                    delay *= _BACKOFF_FACTOR
+                    delay *= DB_BACKOFF_FACTOR
 
             logger.error(
                 "db: the pool could not be opened: %s: %s", type(last_error).__name__, last_error
@@ -196,9 +164,9 @@ class Database:
 
     async def _read_catalog(self) -> SchemaGraph:
         async with self.pool.acquire() as conn:
-            tables = await conn.fetch(_TABLES_SQL, self._settings.db_schema)
+            tables = await conn.fetch(TABLES_SQL, self._settings.db_schema)
             logger.debug("db: catalog read %d tables", len(tables))
-            columns = await conn.fetch(_COLUMNS_SQL, self._settings.db_schema)
+            columns = await conn.fetch(COLUMNS_SQL, self._settings.db_schema)
             logger.debug("db: catalog read %d columns", len(columns))
 
         columns_by_table: dict[str, list] = {}

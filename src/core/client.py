@@ -9,10 +9,16 @@ from unicodedata import category
 from core.answer import bind_template
 from core.capabilities import Catalog, Embedder, Planner, Runner
 from core.catalog import SchemaGraph
-from core.config import PROVIDER_LOCAL, PROVIDER_NONE, Settings
+from core.config import Settings
 from core.constants import (
+    ALLOWED_CONTROL,
     APP_NAME,
+    BLOCKED_CATEGORIES,
+    DATABASE_DOWN,
+    DATABASE_UP,
+    DISALLOWED_SUBSTRINGS,
     ELAPSED_PRECISION,
+    EMBEDDING_OFF,
     ERROR_MESSAGE_MAX_CHARS,
     EXPOSE_SQL,
     HEALTH_PING_CACHE_SECONDS,
@@ -23,7 +29,12 @@ from core.constants import (
     NO_ANSWER_MESSAGE,
     NO_RECORDS_MESSAGE,
     PLANNING_FAILED_MESSAGE,
+    PROVIDER_API,
+    PROVIDER_LOCAL,
+    PROVIDER_NONE,
     RECOVERY_INTERVAL_SECONDS,
+    STATUS_DEGRADED,
+    STATUS_OK,
 )
 from core.exceptions import ConfigurationError, PlanningError, QuestionError
 from core.guard import statement_for
@@ -32,11 +43,6 @@ from core.planning import PlanRequest
 from core.planning import make_plan as plan_a_question
 from core.retrieval import SchemaIndex, link
 from core.wire import (
-    DATABASE_DOWN,
-    DATABASE_UP,
-    EMBEDDING_OFF,
-    STATUS_DEGRADED,
-    STATUS_OK,
     HealthResponse,
     SearchResponse,
 )
@@ -59,11 +65,6 @@ def _detect_version() -> str:
         return version("sidecardb")
     except PackageNotFoundError:
         return "0+local"
-
-
-_DISALLOWED_SUBSTRINGS = ("--", "/*", "*/", ";", "\0")
-_ALLOWED_CONTROL = ("\t", "\n", "\r")
-_BLOCKED_CATEGORIES = ("Cc", "Cf", "Cs")
 
 
 class SidecarDB:
@@ -114,10 +115,19 @@ class SidecarDB:
                 "Mandatory dependency missing: DATABASE_URL is not configured."
             )
         logger.debug("verification: DATABASE_URL is configured")
-        if self._owns_planner and not (settings.llm_api_key and settings.llm_api_key.strip()):
-            raise ConfigurationError(
-                "Mandatory dependency missing: LLM_API_KEY is not configured in environment."
-            )
+        if self._owns_planner:
+            if not (settings.llm_api_key and settings.llm_api_key.strip()):
+                raise ConfigurationError(
+                    "Mandatory dependency missing: LLM_API_KEY is not configured in environment."
+                )
+            if not (settings.llm_base_url and settings.llm_base_url.strip()):
+                raise ConfigurationError(
+                    "Mandatory dependency missing: LLM_BASE_URL is not configured in environment."
+                )
+            if not (settings.llm_model and settings.llm_model.strip()):
+                raise ConfigurationError(
+                    "Mandatory dependency missing: LLM_MODEL is not configured in environment."
+                )
         logger.info("LLM configuration verification successful (model: %s).", settings.llm_model)
         if self._owns_embedder:
             self._verify_embeddings(settings)
@@ -135,6 +145,15 @@ class SidecarDB:
         if settings.embedding_provider == PROVIDER_NONE:
             logger.info("Embeddings are off; retrieval will use catalog order.")
             return
+        if not settings.embedding_model:
+            raise ConfigurationError(
+                "Mandatory dependency missing: EMBEDDING_MODEL is not configured in environment."
+            )
+        if settings.embedding_provider == PROVIDER_API and not settings.embedding_api_base_url:
+            raise ConfigurationError(
+                "Mandatory dependency missing: "
+                "EMBEDDING_API_BASE_URL is not configured in environment."
+            )
         if (
             settings.embedding_provider == PROVIDER_LOCAL
             and settings.embedding_local_path
@@ -259,16 +278,16 @@ class SidecarDB:
             return "The question is too short."
         if len(question) > MAX_QUESTION_LENGTH:
             return f"The question is too long (maximum {MAX_QUESTION_LENGTH} characters)."
-        for marker in _DISALLOWED_SUBSTRINGS:
+        for marker in DISALLOWED_SUBSTRINGS:
             if marker in question:
                 logger.warning(
                     "Rejected a %d-character question: disallowed symbols", len(question)
                 )
                 return "The question contains disallowed symbols or comment characters."
         for ch in question:
-            if ch in _ALLOWED_CONTROL:
+            if ch in ALLOWED_CONTROL:
                 continue
-            if category(ch) in _BLOCKED_CATEGORIES:
+            if category(ch) in BLOCKED_CATEGORIES:
                 logger.warning("Rejected question: unsupported control characters")
                 return "The question contains unsupported control or formatting characters."
         if not any(ch.isalnum() for ch in question):

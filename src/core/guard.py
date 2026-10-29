@@ -3,15 +3,23 @@ from typing import TYPE_CHECKING
 import sqlglot
 from sqlglot import exp
 
-from core.constants import DEFAULT_LIMIT, MAX_LIMIT
-from core.exceptions import SecurityError
-from core.plan import (
+from core.constants import (
+    ALLOWED_FUNCTIONS,
+    ANONYMOUS,
+    BLOCKED_NODES,
     COUNT_ALIAS,
+    DEFAULT_LIMIT,
+    DIALECT,
+    MAX_LIMIT,
     MEASURED_INTENTS,
     NULL_TESTS,
     OPERATORS,
     PATTERN_OPERATORS,
+    ROOT_TYPE,
     WILDCARD,
+)
+from core.exceptions import SecurityError
+from core.plan import (
     MeasureFunction,
     QueryIntent,
     Statement,
@@ -24,35 +32,6 @@ if TYPE_CHECKING:
     from core.plan import Plan
 
 logger = get_logger("guard")
-
-
-ANONYMOUS = "anonymous"
-DIALECT = "postgres"
-ROOT_TYPE = exp.Select
-
-ALLOWED_FUNCTIONS = frozenset(("count", "sum", "avg", "min", "max"))
-
-BLOCKED_NODES = (
-    exp.Insert,
-    exp.Update,
-    exp.Delete,
-    exp.Drop,
-    exp.Alter,
-    exp.Create,
-    exp.TruncateTable,
-    exp.Command,
-    exp.Grant,
-    exp.Revoke,
-    exp.Transaction,
-    exp.Commit,
-    exp.Rollback,
-    exp.Set,
-    exp.Use,
-    exp.Merge,
-    exp.Copy,
-    exp.Pragma,
-    exp.Into,
-)
 
 
 def quote(name: str) -> str:

@@ -1,4 +1,5 @@
-from core.plan import SCALAR_INTENTS, QueryIntent
+from core.constants import SCALAR_INTENTS
+from core.plan import QueryIntent
 from utils.logging_config import get_logger
 
 logger = get_logger("answer")

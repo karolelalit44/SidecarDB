@@ -6,12 +6,8 @@ WORKDIR /build
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
 
-# One step and one environment: pip builds the wheel in an isolated env and
-# resolves every dependency here, where nothing is pre-installed, then lands
-# all of it under /install. Splitting the wheel build into the system env
-# makes pip mark transitive deps of the build tooling (e.g. packaging) as
-# already satisfied and silently omit them from /install.
-RUN pip install --no-cache-dir --prefix /install .
+RUN pip install --no-cache-dir --upgrade pip hatchling \
+    && pip install --no-cache-dir --no-build-isolation --prefix /install packaging .
 
 FROM python:3.12-slim
 

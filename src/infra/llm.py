@@ -8,11 +8,22 @@ from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
 from core.constants import (
+    COMPLETION_TOKENS_FIELD,
+    FINISH_REASON_FIELD,
+    FINISH_REASON_LENGTH,
+    JSON_INSTRUCTION,
     LLM_MAX_TOKENS,
     LLM_RETRIES,
     LLM_TEMPERATURE,
     LLM_TIMEOUT_SECONDS,
     LOG_LLM_PAYLOADS,
+    METADATA_SOURCES,
+    PROMPT_TOKENS_FIELD,
+    REASONING_BUDGET_WARNING,
+    REASONING_EMPTY_RESPONSE,
+    REASONING_FIELD,
+    SERVED_MODEL_FIELD,
+    USAGE_FIELD,
 )
 from core.exceptions import ConfigurationError, PlanningError, ProviderError
 from utils.logging_config import get_logger
@@ -21,30 +32,6 @@ if TYPE_CHECKING:
     from core.config import Settings
 
 logger = get_logger("llm")
-
-JSON_INSTRUCTION = (
-    "Reply with one JSON object and nothing else. No prose, no explanation, "
-    "no markdown code fences. Start with { and end with }."
-)
-
-METADATA_SOURCES = ("response_metadata", "additional_kwargs")
-
-FINISH_REASON_FIELD = "finish_reason"
-FINISH_REASON_LENGTH = "length"
-REASONING_FIELD = "reasoning_content"
-USAGE_FIELD = "usage_metadata"
-SERVED_MODEL_FIELD = "model_name"
-COMPLETION_TOKENS_FIELD = "output_tokens"
-PROMPT_TOKENS_FIELD = "input_tokens"
-
-REASONING_BUDGET_WARNING = (
-    "The model spent its entire completion budget reasoning and returned no answer. "
-    "Raise the completion budget or turn the model's thinking mode off."
-)
-REASONING_EMPTY_RESPONSE = (
-    "The model used its entire completion budget without returning an answer. "
-    "Raise the completion budget."
-)
 
 
 class LLMClient:
@@ -55,6 +42,10 @@ class LLMClient:
     def chat_model(self) -> BaseChatModel:
         if not self._settings.llm_api_key:
             raise ConfigurationError("LLM_API_KEY is not configured.")
+        if not self._settings.llm_base_url:
+            raise ConfigurationError("LLM_BASE_URL is not configured.")
+        if not self._settings.llm_model:
+            raise ConfigurationError("LLM_MODEL is not configured.")
         if self._model is None:
             settings = self._settings
             logger.debug(

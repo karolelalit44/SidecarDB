@@ -1,9 +1,9 @@
 import argparse
 import asyncio
-import os
 from collections.abc import Sequence
 
-from core.constants import DEFAULT_HOST, DEFAULT_PORT, DEFAULT_ROLE_NAME
+from core.config import Settings
+from core.constants import DEFAULT_HOST, DEFAULT_PORT, DEFAULT_SCHEMA
 from utils.logging_config import get_logger
 
 logger = get_logger("cli")
@@ -34,18 +34,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     roles.add_argument(
         "--role",
-        default=DEFAULT_ROLE_NAME,
-        help=f"Name of the role to create (default: {DEFAULT_ROLE_NAME})",
+        default=None,
+        help="Name of the role to create (default: DB_ROLE from settings)",
     )
     roles.add_argument(
         "--schema",
-        default="public",
-        help="Schema the role may read from (default: public)",
+        default=DEFAULT_SCHEMA,
+        help=f"Schema the role may read from (default: {DEFAULT_SCHEMA})",
     )
     roles.add_argument(
         "--password",
-        default=os.environ.get("DB_PASSWORD"),
-        help="Password for the new role (default: DB_PASSWORD environment variable)",
+        default=None,
+        help="Password for the new role (default: DB_PASSWORD from settings)",
     )
     return parser
 
@@ -66,13 +66,19 @@ def serve(host: str | None, port: int | None, env_file: str | None) -> None:
     )
 
 
-def setup_roles(admin_dsn: str, role: str, schema: str, password: str | None) -> None:
+def setup_roles(admin_dsn: str, role: str | None, schema: str, password: str | None) -> None:
     from infra.roles import create_read_only_role
 
-    if not password:
-        logger.error("No role password: pass --password or set DB_PASSWORD in the environment.")
+    settings = Settings()
+    effective_role = role or settings.db_role
+    if not effective_role:
+        logger.error("No role name: pass --role or set DB_ROLE in settings.")
         raise SystemExit(2)
-    asyncio.run(create_read_only_role(admin_dsn, role, password, schema))
+    effective_password = password or settings.db_password
+    if not effective_password:
+        logger.error("No role password: pass --password or set DB_PASSWORD in settings.")
+        raise SystemExit(2)
+    asyncio.run(create_read_only_role(admin_dsn, effective_role, effective_password, schema))
 
 
 def main(argv: Sequence[str] | None = None) -> int:

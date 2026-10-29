@@ -1,13 +1,4 @@
-PG_IDENTIFIER_MAX_LENGTH = 63
-IDENTIFIER_EXTRA_CHARACTERS = frozenset("_$")
-
-__all__ = [
-    "IDENTIFIER_EXTRA_CHARACTERS",
-    "PG_IDENTIFIER_MAX_LENGTH",
-    "is_safe_identifier",
-    "quote_identifier",
-    "quote_literal",
-]
+from core.constants import IDENTIFIER_EXTRA_CHARACTERS, PG_IDENTIFIER_MAX_LENGTH
 
 
 def is_safe_identifier(name: str) -> bool:
@@ -26,3 +17,10 @@ def quote_identifier(name: str) -> str:
 
 def quote_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
+
+
+__all__ = [
+    "is_safe_identifier",
+    "quote_identifier",
+    "quote_literal",
+]

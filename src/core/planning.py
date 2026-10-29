@@ -4,14 +4,16 @@ from typing import TYPE_CHECKING
 from pydantic import ValidationError
 
 from core.catalog import SchemaGraph
-from core.exceptions import ConfigurationError, PlanningError, ProviderError
-from core.plan import (
-    COMPARISON_OPERATORS,
+from core.constants import (
     DEFAULT_COMPARISON,
     MEASURED_INTENTS,
     NULL_TESTS,
+    OPERATOR_TEXT,
     OPERATORS,
-    PATTERN_OPERATORS,
+    TRUNCATION_MARK,
+)
+from core.exceptions import ConfigurationError, PlanningError, ProviderError
+from core.plan import (
     MeasureFunction,
     Plan,
     PlanPolicy,
@@ -32,14 +34,6 @@ class PlanRequest:
     policy: PlanPolicy
     tables: list[str] = field(default_factory=list)
 
-
-COMPARISON_TEXT = ", ".join(repr(op) for op in COMPARISON_OPERATORS)
-PATTERN_TEXT = ", ".join(repr(op) for op in PATTERN_OPERATORS)
-NULL_TEST_TEXT = ", ".join(repr(op) for op in NULL_TESTS)
-OPERATOR_TEXT = (
-    f"a comparison ({COMPARISON_TEXT}), a pattern match ({PATTERN_TEXT}), "
-    f"or a null test ({NULL_TEST_TEXT})"
-)
 
 SYSTEM = f"""\
 You produce a Plan JSON object for the schema supplied below.
@@ -104,8 +98,6 @@ Return a corrected plan. Verify each table and column against SCHEMA before
 answering. If a column was rejected, pick only from the available columns.
 Read the field contracts above.
 """
-
-TRUNCATION_MARK = " [...]"
 
 
 def column_scope(plan: Plan, graph: SchemaGraph) -> set[str]:

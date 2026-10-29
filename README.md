@@ -58,18 +58,19 @@ sidecardb serve --port 8000
 | POST   | `/api/v1/search`           | `{"question": "..."}` → answer + rows     |
 | GET    | `/docs`                    | OpenAPI UI                                |
 
-Every settable key is documented in [`.env.example`](.env.example). Behaviour constants live in
+Configuration is supplied via environment variables (see `../usage/.env.example`). Behaviour constants live in
 [`src/core/constants.py`](src/core/constants.py).
 
 ## Docker
 
+Build and run the standalone service container:
+
 ```bash
-cp .env.example .env   # fill in DATABASE_URL, LLM_API_KEY, and passwords
-docker compose up --build
+docker build -t sidecardb .
+docker run -p 8000:8000 --env-file ../usage/.env sidecardb
 ```
 
-The compose stack starts a pgvector PostgreSQL seeded with a demo schema **and creates a
-dedicated read-only role** — no credential is committed to this repository.
+For a complete demo stack with sample PostgreSQL and client scripts, see [`../usage`](../usage).
 
 ## Provisioning the read-only role
 

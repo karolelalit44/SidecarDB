@@ -2,9 +2,15 @@ import json
 import logging
 import sys
 
-from core.constants import LOG_COLOR, LOG_DEPENDENCY_LEVEL, LOG_FORMAT, LOG_LEVEL
+from core.constants import (
+    APP_NAME,
+    LOG_COLOR,
+    LOG_DEPENDENCY_LEVEL,
+    LOG_FORMAT,
+    LOG_LEVEL,
+)
 
-NAMESPACE = "sidecardb"
+NAMESPACE = APP_NAME
 
 RESET = "\033[0m"
 DIM = "\033[2m"
