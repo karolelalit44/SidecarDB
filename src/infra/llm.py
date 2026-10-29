@@ -22,9 +22,6 @@ if TYPE_CHECKING:
 
 logger = get_logger("llm")
 
-FENCE = "```"
-JSON_TAG = "json"
-
 JSON_INSTRUCTION = (
     "Reply with one JSON object and nothing else. No prose, no explanation, "
     "no markdown code fences. Start with { and end with }."
@@ -118,7 +115,7 @@ class LLMClient:
         meta = provider_metadata(result)
         usage = meta.get(USAGE_FIELD)
         usage = usage if isinstance(usage, dict) else {}
-        content = _answer(result)
+        content = _model_content(result)
         reasoning = _reasoning(meta)
         finish_reason = meta.get(FINISH_REASON_FIELD)
 
@@ -167,33 +164,18 @@ class LLMClient:
 def extract_json(text: str) -> dict[str, Any]:
     if not text:
         raise PlanningError("The model returned an empty response.")
-
-    candidate = _strip_fence(text.strip())
-    parsed = _loads(candidate)
-    if isinstance(parsed, dict):
-        return parsed
-
-    start = candidate.find("{")
-    while start != -1:
-        end = _balanced_end(candidate, start)
+    start = 0
+    while True:
+        start = text.find("{", start)
+        if start == -1:
+            break
+        end = _balanced_end(text, start)
         if end is not None:
-            parsed = _loads(candidate[start : end + 1])
+            parsed = _loads(text[start : end + 1])
             if isinstance(parsed, dict):
                 return parsed
-        start = candidate.find("{", start + 1)
-
+        start += 1
     raise PlanningError("The model response contained no JSON object.")
-
-
-def _strip_fence(text: str) -> str:
-    marker = text.find(FENCE)
-    if marker == -1:
-        return text
-    body = text[marker + len(FENCE) :]
-    if body[: len(JSON_TAG)].lower() == JSON_TAG:
-        body = body[len(JSON_TAG) :]
-    end = body.find(FENCE)
-    return (body[:end] if end != -1 else body).strip()
 
 
 def _loads(text: str):
@@ -237,7 +219,7 @@ def provider_metadata(result: Any) -> dict[str, Any]:
     return merged
 
 
-def _answer(result: Any) -> str:
+def _model_content(result: Any) -> str:
     content = getattr(result, "content", None)
     return content if isinstance(content, str) else ""
 

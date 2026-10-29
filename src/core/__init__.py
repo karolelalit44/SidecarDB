@@ -1,50 +1,36 @@
-from typing import TYPE_CHECKING, Any
-
 from core.catalog import SchemaGraph
 from core.client import SidecarDB, _detect_version
 from core.config import Settings, get_settings
 from core.exceptions import (
+    CatalogError,
     ConfigurationError,
     EmbeddingError,
     ExecutionError,
     PlanningError,
     ProviderError,
-    QueryError,
-    SchemaError,
+    QuestionError,
     SearchError,
     SecurityError,
 )
-from core.plan import MeasureFunction, QueryIntent, QueryPlan
+from core.plan import MeasureFunction, Plan, QueryIntent
 from core.retrieval import RetrievalMode
 from core.wire import HealthResponse, SearchRequest, SearchResponse
 
 __version__ = _detect_version()
 
-if TYPE_CHECKING:
-    from fastapi import FastAPI
-
-
-def create_app(sidecar_db: SidecarDB | None = None, **overrides: Any) -> "FastAPI":
-    from core.server import create_app as _create_app
-
-    if sidecar_db is None and overrides:
-        sidecar_db = SidecarDB(**overrides)
-    return _create_app(sidecar_db)
-
-
 __all__ = [
+    "CatalogError",
     "ConfigurationError",
     "EmbeddingError",
     "ExecutionError",
     "HealthResponse",
     "MeasureFunction",
+    "Plan",
     "PlanningError",
     "ProviderError",
-    "QueryError",
     "QueryIntent",
-    "QueryPlan",
+    "QuestionError",
     "RetrievalMode",
-    "SchemaError",
     "SchemaGraph",
     "SearchError",
     "SearchRequest",
@@ -53,6 +39,5 @@ __all__ = [
     "Settings",
     "SidecarDB",
     "__version__",
-    "create_app",
     "get_settings",
 ]

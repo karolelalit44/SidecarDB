@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "sidecardb"
-version = "2.2.0"
+version = "3.0.0"
 description = "Ask a PostgreSQL database a question in plain English and get the rows back."
 readme = "README.md"
 license = "MIT"

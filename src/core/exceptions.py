@@ -6,7 +6,7 @@ class ConfigurationError(SearchError):
     status_code = 500
 
 
-class QueryError(SearchError):
+class QuestionError(SearchError):
     pass
 
 
@@ -14,7 +14,7 @@ class SecurityError(SearchError):
     status_code = 403
 
 
-class SchemaError(SearchError):
+class CatalogError(SearchError):
     status_code = 500
 
 

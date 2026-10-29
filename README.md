@@ -3,8 +3,8 @@
 **Ask a PostgreSQL database a question in plain English and get the rows back — safely.**
 
 `sidecarDB` is a plug-and-play natural-language search engine for PostgreSQL. It introspects your
-schema at runtime, lets a language model *plan* a query as a constrained JSON object (never raw
-SQL), validates that plan against an AST guard and your live catalog, executes it inside a
+schema at runtime, lets a language model *plan* the search as a constrained JSON object (never
+raw SQL), validates that plan against an AST guard and your live catalog, executes it inside a
 read-only sandbox with bound parameters, and returns the rows with a plain-English answer.
 
 It ships as both a **library** you embed and an **HTTP service** you deploy. The whole
@@ -55,7 +55,7 @@ sidecardb serve --port 8000
 | ------ | -------------------------- | ----------------------------------------- |
 | GET    | `/health`                  | Liveness: pings the database, reports degraded as `503` |
 | GET    | `/api/v1/schema`           | The mapped catalog (`?refresh=true` re-introspects) |
-| POST   | `/api/v1/search`           | `{"query": "..."}` → answer + rows        |
+| POST   | `/api/v1/search`           | `{"question": "..."}` → answer + rows     |
 | GET    | `/docs`                    | OpenAPI UI                                |
 
 Every settable key is documented in [`.env.example`](.env.example). Behaviour constants live in
@@ -91,14 +91,14 @@ Untrusted questions never become SQL. Six independent layers stand between a que
 data:
 
 1. **Input validation** rejects comment markers, statement separators, and control characters.
-2. **The LLM plans, it does not execute.** It returns a JSON `QueryPlan` (table, intent,
+2. **The LLM plans, it does not execute.** It returns a JSON `Plan` (table, intent,
    filter, projection…), never SQL. The plan is checked against the *live catalog*; unknown
    tables and columns are rejected and fed back for repair.
 3. **AST guard** (sqlglot): only `SELECT` is accepted; mutations, DDL, `COPY … TO PROGRAM`,
-   `DO $$`, transactions, and a blocklist of dangerous functions (`pg_read_file`, `dblink`,
-   `pg_terminate_backend`, …) are refused. Table references must live in the configured
-   schema — any database-level qualifier is rejected, and a schema qualifier is only accepted
-   when it names the configured schema. A `LIMIT` is always enforced.
+   `DO $$`, transactions, and any function call outside the plan vocabulary
+   (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`) are refused. Table references must live in the
+   configured schema — any database-level qualifier is rejected, and a schema qualifier is only
+   accepted when it names the configured schema. A `LIMIT` is always enforced.
 4. **Bound parameters**: filter and search values travel as `$1` placeholders, never
    interpolated into SQL text.
 5. **Sandboxed execution**: read-only session + read-only transaction + `statement_timeout` +
@@ -108,9 +108,10 @@ data:
    (see `src/ops/setup_roles.sh`).
 
 Operational hardening: optional API-key auth (`API_KEYS`), per-client rate limiting, request
-body caps, request-id sanitisation, catalog names redacted from errors, and generated SQL
-withheld from responses (the disclosure switches are package constants, not environment
-options).
+body caps (of both declared and streamed bodies), request-id sanitisation, catalog names
+redacted from errors, and generated SQL withheld from responses (the disclosure switches are
+package constants, not environment options). Optional CORS gating is likewise tuned only by
+package constants (`CORS_ALLOW_ORIGINS` and friends; it is off by default).
 
 > Use a dedicated read-only database role. The sandbox is defense in depth, not a substitute
 > for database-level privileges.
@@ -125,7 +126,7 @@ options).
 - Terminate TLS and enforce global rate limits at your edge; the built-in limiter is
   per-process.
 - Point `LLM_BASE_URL`/`LLM_MODEL` at a provider you trust; questions and schema summaries are
-  sent to it.
+  sent to it over the built-in transport (a LangChain OpenAI chat client).
 - Run the container as the built-in non-root user (default) and keep `docker compose` passwords
   out of version control.
 

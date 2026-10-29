@@ -1,10 +1,11 @@
 import asyncio
 import contextlib
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from core.answer import render_template
+from core.answer import bind_template
 from core.capabilities import Catalog, Embedder, Planner, Runner
 from core.catalog import SchemaGraph
 from core.config import PROVIDER_LOCAL, PROVIDER_NONE, Settings
@@ -15,22 +16,21 @@ from core.constants import (
     EXPOSE_SQL,
     HEALTH_PING_CACHE_SECONDS,
     LOG_LLM_PAYLOADS,
-    MAX_QUERY_LENGTH,
-    MIN_QUERY_LENGTH,
+    LOG_SQL,
+    MAX_QUESTION_LENGTH,
+    MIN_QUESTION_LENGTH,
+    NO_ANSWER_MESSAGE,
     NO_RECORDS_MESSAGE,
-    NO_SUMMARY_MESSAGE,
+    PLANNING_FAILED_MESSAGE,
     RECOVERY_INTERVAL_SECONDS,
 )
-from core.exceptions import ConfigurationError, PlanningError, QueryError
+from core.exceptions import ConfigurationError, PlanningError, QuestionError
 from core.guard import statement_for
-from core.plan import (
-    Outcome,
-    PlanPolicy,
-    check_question,
-    redact,
-)
-from core.plan import plan as plan_a_question
+from core.plan import Outcome, Plan, PlanPolicy
+from core.planning import PlanRequest
+from core.planning import make_plan as plan_a_question
 from core.retrieval import SchemaIndex, link
+from core.screening import check_question
 from core.wire import (
     DATABASE_DOWN,
     DATABASE_UP,
@@ -150,7 +150,7 @@ class SidecarDB:
                 "unauthenticated requests. Set at least one key before exposing it."
             )
         try:
-            await self._map()
+            await self._refresh_catalog()
         except Exception:
             if require_database:
                 raise
@@ -161,7 +161,7 @@ class SidecarDB:
             self._recovery_task = asyncio.create_task(self._recover())
         self._started = True
 
-    async def _map(self) -> SchemaGraph:
+    async def _refresh_catalog(self) -> SchemaGraph:
         started = time.perf_counter()
         logger.debug("refresh: introspecting the catalog of schema %s", self.settings.db_schema)
         graph = await self._catalog.introspect()
@@ -183,7 +183,7 @@ class SidecarDB:
         interval = RECOVERY_INTERVAL_SECONDS
         while not self._stop_event.is_set():
             try:
-                await self._map()
+                await self._refresh_catalog()
                 logger.info("Database recovered; the catalog is mapped again.")
                 return
             except Exception as exc:
@@ -222,22 +222,22 @@ class SidecarDB:
         await self.stop()
 
     async def search(self, question: str, request_id: str | None = None) -> SearchResponse:
-        query = (question or "").strip()
-        logger.debug("[%s] search received %d chars", request_id, len(query))
+        question = (question or "").strip()
+        logger.debug("[%s] search received %d chars", request_id, len(question))
 
-        reason = self._reject_query(query)
+        reason = self._reject_question(question)
         if reason:
-            raise QueryError(reason)
+            raise QuestionError(reason)
 
         if not self._started:
             await self.start(require_database=False)
         graph = self._graph
         if graph is None:
-            graph = await self._map()
+            graph = await self._refresh_catalog()
 
         started = time.perf_counter()
         try:
-            outcome = await self._run_pipeline(query, graph)
+            outcome = await self._run_pipeline(question, graph)
         except Exception as exc:
             elapsed = round((time.perf_counter() - started) * 1000, ELAPSED_PRECISION)
             logger.error(
@@ -249,25 +249,26 @@ class SidecarDB:
                 exc_info=LOG_LLM_PAYLOADS,
             )
             raise
-        return self._respond(outcome, query, request_id, started)
+        return self._respond(outcome, question, request_id, started)
 
-    def _reject_query(self, question: str) -> str | None:
-        if len(question) < MIN_QUERY_LENGTH:
+    def _reject_question(self, question: str) -> str | None:
+        if len(question) < MIN_QUESTION_LENGTH:
             return "The question is too short."
-        if len(question) > MAX_QUERY_LENGTH:
-            return f"The question is too long (maximum {MAX_QUERY_LENGTH} characters)."
+        if len(question) > MAX_QUESTION_LENGTH:
+            return f"The question is too long (maximum {MAX_QUESTION_LENGTH} characters)."
         problem = check_question(question)
         if problem:
-            logger.warning("Risky question rejected: %s (%s)", question, problem)
-            return "Invalid query: " + problem
+            logger.warning("Rejected a %d-character question: %s", len(question), problem)
+            return problem
         return None
 
-    async def _run_pipeline(self, query: str, graph: SchemaGraph) -> Outcome:
-        policy = self.plan_policy
-        tables, retrieval_mode, retrieved = await link(query, graph, self._index, policy)
+    async def _run_pipeline(self, question: str, graph: SchemaGraph) -> Outcome:
+        request = PlanRequest(question=question, graph=graph, policy=self.plan_policy)
+        tables, retrieval_mode, retrieved = await link(request, self._index)
         logger.debug("link: mode=%s tables=%s", retrieval_mode.value, tables)
 
-        plan = await self._plan_pipeline(query, graph, tables)
+        request = replace(request, tables=tables)
+        plan = await self._plan_pipeline(request)
         statement = statement_for(plan, graph, self.settings.db_schema)
         logger.debug("guard: statement composed (%d bound parameter(s))", len(statement.params))
 
@@ -281,14 +282,12 @@ class SidecarDB:
             retrieval_mode=retrieval_mode,
         )
 
-    async def _plan_pipeline(self, question: str, graph: SchemaGraph, tables: list[str]):
-        policy = self.plan_policy
+    async def _plan_pipeline(self, request: PlanRequest) -> Plan:
+        policy = request.policy
         plan_result = None
         error = None
         for attempt in range(policy.max_plan_attempts):
-            plan_result, error = await plan_a_question(
-                question, graph, tables, policy, self.planner, error, attempt
-            )
+            plan_result, error = await plan_a_question(request, self.planner, error, attempt)
             if plan_result is not None:
                 break
             logger.debug(
@@ -300,11 +299,11 @@ class SidecarDB:
 
         if plan_result is None:
             logger.error("No plan survived %d attempts: %s", policy.max_plan_attempts, error)
-            raise PlanningError(redact(error or "No valid plan was produced."))
+            raise PlanningError(PLANNING_FAILED_MESSAGE)
         return plan_result
 
     def _respond(
-        self, outcome: Outcome, query: str, request_id: str | None, started: float
+        self, outcome: Outcome, question: str, request_id: str | None, started: float
     ) -> SearchResponse:
         rows = outcome.rows
 
@@ -315,17 +314,16 @@ class SidecarDB:
                 request_id,
             )
         else:
-            answer = render_template(
+            answer = bind_template(
                 outcome.plan.template or "",
                 rows,
                 outcome.plan.intent,
                 max_chars=ERROR_MESSAGE_MAX_CHARS,
             )
             if not answer:
-                answer = NO_SUMMARY_MESSAGE
+                answer = NO_ANSWER_MESSAGE
                 logger.debug(
-                    "[%s] the plan carried no usable response template; using the no-summary "
-                    "message",
+                    "[%s] the plan carried no usable template; using the no-answer message",
                     request_id,
                 )
 
@@ -337,19 +335,31 @@ class SidecarDB:
             len(answer),
             EXPOSE_SQL,
         )
-        logger.info(
-            "[%s] intent=%s mode=%s rows=%d tables=%s sql=%s bound_params=%d",
-            request_id,
-            outcome.plan.intent.value,
-            outcome.retrieval_mode.value,
-            len(rows),
-            outcome.retrieved_tables,
-            outcome.statement.sql,
-            len(outcome.statement.params),
-        )
+        if LOG_SQL:
+            logger.info(
+                "[%s] intent=%s mode=%s rows=%d tables=%s sql=%s bound_params=%d",
+                request_id,
+                outcome.plan.intent.value,
+                outcome.retrieval_mode.value,
+                len(rows),
+                outcome.retrieved_tables,
+                outcome.statement.sql,
+                len(outcome.statement.params),
+            )
+        else:
+            logger.info(
+                "[%s] intent=%s mode=%s rows=%d tables=%s bound_params=%d "
+                "(LOG_SQL is off; SQL withheld)",
+                request_id,
+                outcome.plan.intent.value,
+                outcome.retrieval_mode.value,
+                len(rows),
+                outcome.retrieved_tables,
+                len(outcome.statement.params),
+            )
 
         return SearchResponse(
-            query=query,
+            question=question,
             answer=answer,
             sql=outcome.statement.sql if EXPOSE_SQL else None,
             row_count=len(rows),
@@ -362,7 +372,7 @@ class SidecarDB:
 
     async def catalog(self, refresh: bool = False) -> SchemaGraph:
         if refresh or self._graph is None:
-            return await self._map()
+            return await self._refresh_catalog()
         return self._graph
 
     async def health(self) -> HealthResponse:

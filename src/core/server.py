@@ -1,3 +1,4 @@
+import json
 import secrets
 import time
 import uuid
@@ -8,6 +9,8 @@ from typing import TYPE_CHECKING
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.datastructures import Headers
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from core.catalog import SchemaGraph
 from core.constants import (
@@ -63,6 +66,78 @@ class RateLimiter:
             return False
         window.append(now)
         return True
+
+
+class _BodyTooLargeError(Exception):
+    pass
+
+
+class BodyCapMiddleware:
+    def __init__(self, app: ASGIApp, *, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request_id = scope.get("state", {}).get("request_id")
+        declared = Headers(scope=scope).get("content-length")
+        if declared and declared.isdigit() and int(declared) > self.max_bytes:
+            logger.warning("[%s] request body too large: %s bytes", request_id, declared)
+            await self._reject(send, request_id)
+            return
+
+        received = 0
+        response_started = False
+
+        async def guarded_receive() -> Message:
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    raise _BodyTooLargeError()
+            return message
+
+        async def guarded_send(message: Message) -> None:
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, guarded_receive, guarded_send)
+        except _BodyTooLargeError:
+            logger.warning(
+                "[%s] streamed request body passed %d bytes before it ended",
+                request_id,
+                self.max_bytes,
+            )
+            if response_started:
+                raise
+            await self._reject(send, request_id)
+
+    async def _reject(self, send: Send, request_id: str | None) -> None:
+        payload = json.dumps(
+            {
+                "error": "PayloadTooLarge",
+                "message": f"The request body exceeds {self.max_bytes} bytes.",
+                "request_id": request_id,
+            }
+        ).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 413,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(payload)).encode()),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": payload})
 
 
 def _request_id(raw: str | None) -> str:
@@ -128,25 +203,13 @@ def create_app(sidecar_db: "SidecarDB | None" = None) -> FastAPI:
     )
     app.state.sidecar_db = sidecar_db
 
+    app.add_middleware(BodyCapMiddleware, max_bytes=MAX_REQUEST_BODY_BYTES)
+
     @app.middleware("http")
     async def edge(request: Request, call_next):
         request.state.request_id = _request_id(request.headers.get(REQUEST_ID_HEADER.lower()))
         request_id = request.state.request_id
         started = time.perf_counter()
-
-        declared_length = request.headers.get("content-length")
-        if (
-            declared_length
-            and declared_length.isdigit()
-            and (int(declared_length) > MAX_REQUEST_BODY_BYTES)
-        ):
-            logger.warning("[%s] request body too large: %s bytes", request_id, declared_length)
-            return _error(
-                413,
-                "PayloadTooLarge",
-                f"The request body exceeds {MAX_REQUEST_BODY_BYTES} bytes.",
-                request_id,
-            )
 
         protected = request.url.path.startswith(PROTECTED_PREFIX)
         if (
@@ -234,8 +297,8 @@ def create_app(sidecar_db: "SidecarDB | None" = None) -> FastAPI:
     @app.post("/api/v1/search", response_model=SearchResponse)
     async def search(payload: SearchRequest, request: Request) -> SearchResponse:
         request_id = getattr(request.state, "request_id", None)
-        logger.debug("[%s] search accepted: %r", request_id, payload.query)
-        result = await sidecar_db.search(payload.query, request_id)
+        logger.debug("[%s] search accepted: %r", request_id, payload.question)
+        result = await sidecar_db.search(payload.question, request_id)
         logger.debug(
             "[%s] search answered: rows=%d elapsed=%s ms",
             request_id,

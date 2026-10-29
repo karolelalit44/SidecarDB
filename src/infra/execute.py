@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 from core.constants import (
     ERROR_MESSAGE_MAX_CHARS,
     LOG_SQL,
+    MS_PER_SECOND,
     REDACT_CATALOG_IN_ERRORS,
     SANDBOX_APP_TIMEOUT_SECONDS,
     SANDBOX_MAX_ROWS,
@@ -12,6 +13,7 @@ from core.constants import (
     SANDBOX_TRANSACTION_READ_ONLY,
 )
 from core.exceptions import ConfigurationError, ExecutionError, SecurityError
+from core.guard import validate
 from core.plan import Statement
 from utils.logging_config import get_logger
 
@@ -20,7 +22,13 @@ if TYPE_CHECKING:
 
 logger = get_logger("execute")
 
-MS_PER_SECOND = 1000
+REDACTED_BY_SQLSTATE = {
+    "42501": "the database denied the statement access to an object",
+    "57014": "the statement exceeded the database's execution budget",
+}
+REDACTED_BY_SQLSTATE_CLASS = {
+    "42": "the statement named an object the database does not provide",
+}
 
 
 class Sandbox:
@@ -28,10 +36,8 @@ class Sandbox:
         self._database = database
 
     async def run(self, statement: Statement) -> list[dict]:
-        sql = statement.sql
+        sql = validate(statement.sql, None, "").sql
         args = statement.params
-        if not sql or not sql.strip():
-            raise SecurityError("Empty statement.")
 
         started = time.perf_counter()
         logger.debug(
@@ -77,13 +83,19 @@ class Sandbox:
         try:
             rows = await asyncio.wait_for(_execute(), timeout=SANDBOX_APP_TIMEOUT_SECONDS)
         except TimeoutError as exc:
-            logger.error(
-                "Execution exceeded the %ss budget: %s",
-                SANDBOX_APP_TIMEOUT_SECONDS,
-                sql,
-            )
+            if LOG_SQL:
+                logger.error(
+                    "Execution exceeded the %ss budget: %s",
+                    SANDBOX_APP_TIMEOUT_SECONDS,
+                    sql,
+                )
+            else:
+                logger.error(
+                    "Execution exceeded the %ss budget (LOG_SQL is off; SQL withheld)",
+                    SANDBOX_APP_TIMEOUT_SECONDS,
+                )
             raise ExecutionError(
-                f"Query exceeded the {SANDBOX_APP_TIMEOUT_SECONDS}s execution budget."
+                f"Statement exceeded the {SANDBOX_APP_TIMEOUT_SECONDS}s execution budget."
             ) from exc
         except (ConfigurationError, SecurityError):
             raise
@@ -104,9 +116,17 @@ class Sandbox:
         return rows
 
     def _safe_message(self, exc: Exception) -> str:
-        detail = str(exc).split("\n", 1)[0].strip()
         if REDACT_CATALOG_IN_ERRORS:
-            detail = detail.split("(")[0].strip()
-        if not detail:
-            detail = "rejected by the database"
-        return f"Query rejected: {detail[:ERROR_MESSAGE_MAX_CHARS]}"
+            return f"Statement rejected: {self._classified_message(exc)}"
+        detail = str(exc).split("\n", 1)[0].strip() or "rejected by the database"
+        return f"Statement rejected: {detail[:ERROR_MESSAGE_MAX_CHARS]}"
+
+    def _classified_message(self, exc: Exception) -> str:
+        sqlstate = getattr(exc, "sqlstate", None)
+        if isinstance(sqlstate, str):
+            content = REDACTED_BY_SQLSTATE.get(sqlstate) or REDACTED_BY_SQLSTATE_CLASS.get(
+                sqlstate[:2]
+            )
+            if content:
+                return content
+        return "the database refused the statement"

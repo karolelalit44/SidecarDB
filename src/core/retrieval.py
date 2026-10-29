@@ -11,6 +11,7 @@ from utils.logging_config import get_logger
 if TYPE_CHECKING:
     from core.capabilities import Embedder
     from core.plan import PlanPolicy
+    from core.planning import PlanRequest
 
 logger = get_logger("retrieval")
 
@@ -84,7 +85,7 @@ class SchemaIndex:
         try:
             query_vector = (await self._embedder.aencode([question]))[0]
         except EmbeddingError as exc:
-            logger.warning("Query embedding failed: %s", exc)
+            logger.warning("Question embedding failed: %s", exc)
             return []
 
         precision = self._policy.retrieval_score_precision
@@ -128,14 +129,13 @@ class SchemaIndex:
 
 
 async def link(
-    question: str,
-    graph: SchemaGraph,
+    request: "PlanRequest",
     index: "SchemaIndex | None",
-    policy: "PlanPolicy",
 ) -> tuple[list[str], RetrievalMode, list[str]]:
+    policy = request.policy
     if index is not None:
         tables = await index.tables_for(
-            question, policy.max_schema_tables, policy.retrieval_min_score
+            request.question, policy.max_schema_tables, policy.retrieval_min_score
         )
         if tables:
             return tables, RetrievalMode.embedding, tables
@@ -144,8 +144,7 @@ async def link(
         "link: no embedding match at or above %s; falling back to catalog order",
         policy.retrieval_min_score,
     )
-    ordered = sorted(graph.tables.values(), key=lambda t: t.row_estimate, reverse=True)
-    names = [t.name for t in ordered[: policy.max_schema_tables]]
+    names = list(request.graph.tables)[: policy.max_schema_tables]
     return names, RetrievalMode.catalog, []
 
 

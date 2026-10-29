@@ -1,9 +1,7 @@
-from core.plan import QueryIntent
+from core.plan import SCALAR_INTENTS, QueryIntent
 from utils.logging_config import get_logger
 
 logger = get_logger("answer")
-
-SCALAR_INTENTS = (QueryIntent.count, QueryIntent.aggregate)
 
 
 class _FormatDict(dict):
@@ -16,7 +14,7 @@ class _FormatDict(dict):
         return ""
 
 
-def render_template(
+def bind_template(
     template: str,
     records: list[dict],
     intent: QueryIntent | None = None,
@@ -45,20 +43,20 @@ def render_template(
     bindings = _FormatDict(context)
     logger.debug("template: binding %r to %d row(s)", template[:max_chars], len(records))
     try:
-        rendered = template.format_map(bindings).strip()
+        filled = template.format_map(bindings).strip()
     except Exception:
-        logger.warning("Template could not be rendered; using the no-summary message.")
+        logger.warning("Template could not be filled; using the no-answer message.")
         return ""
 
     if bindings.missing:
         logger.warning(
-            "Template names %d unbound placeholder(s) such as {%s}; using the no-summary message.",
+            "Template names %d unbound placeholder(s) such as {%s}; using the no-answer message.",
             len(bindings.missing),
             bindings.missing[0],
         )
         return ""
 
-    if len(rendered) > max_chars:
-        rendered = rendered[:max_chars]
-    logger.debug("template: rendered %d chars: %s", len(rendered), rendered)
-    return rendered or ""
+    if len(filled) > max_chars:
+        filled = filled[:max_chars]
+    logger.debug("template: bound %d chars: %s", len(filled), filled)
+    return filled or ""

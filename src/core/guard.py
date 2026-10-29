@@ -7,6 +7,7 @@ from core.constants import DEFAULT_LIMIT, MAX_LIMIT
 from core.exceptions import SecurityError
 from core.plan import (
     COUNT_ALIAS,
+    MEASURED_INTENTS,
     NULL_TESTS,
     OPERATORS,
     PATTERN_OPERATORS,
@@ -20,7 +21,7 @@ from utils.sql import is_safe_identifier, quote_identifier
 
 if TYPE_CHECKING:
     from core.catalog import SchemaGraph
-    from core.plan import QueryPlan
+    from core.plan import Plan
 
 logger = get_logger("guard")
 
@@ -29,32 +30,7 @@ ANONYMOUS = "anonymous"
 DIALECT = "postgres"
 ROOT_TYPE = exp.Select
 
-FORBIDDEN_FUNCTIONS = frozenset(
-    {
-        "pg_sleep",
-        "pg_read_file",
-        "pg_read_binary_file",
-        "pg_ls_dir",
-        "pg_stat_file",
-        "pg_file_read",
-        "pg_logdir_ls",
-        "dblink",
-        "dblink_exec",
-        "dblink_connect",
-        "query_to_xml",
-        "query_to_xml_and_xmlschema",
-        "cursor_to_xml",
-        "pg_terminate_backend",
-        "pg_cancel_backend",
-        "pg_reload_conf",
-        "lo_import",
-        "lo_export",
-        "set_config",
-        "pg_advisory_lock",
-        "pg_advisory_lock_shared",
-        "current_setting",
-    }
-)
+ALLOWED_FUNCTIONS = frozenset(("count", "sum", "avg", "min", "max"))
 
 BLOCKED_NODES = (
     exp.Insert,
@@ -81,42 +57,31 @@ BLOCKED_NODES = (
 
 def quote(name: str) -> str:
     if not is_safe_identifier(name):
-        raise ValueError("Unsafe identifier")
+        logger.debug("guard: refusing to compose the identifier %r", name)
+        raise SecurityError("The Guard cannot write this identifier safely.")
     return quote_identifier(name)
 
 
-def _function_names(node) -> set[str]:
-    names = set()
-    for value in (node.name, node.sql_name()):
-        if isinstance(value, str):
-            lowered = value.lower()
-            if lowered and lowered != ANONYMOUS:
-                names.add(lowered)
-    return names
-
-
-def _is_aggregate(tree: exp.Expression) -> bool:
-    return tree.find(exp.Group) is not None or any(True for _ in tree.find_all(exp.AggFunc))
-
-
-def _rewrites_meaning(tree: exp.Expression, statement: str) -> bool:
-    produced = any(True for _ in tree.find_all(exp.NullSafeEQ))
-    if not produced:
-        return False
-    return "IS NOT DISTINCT FROM" not in statement.upper()
+def _unallowed_function(node: exp.Func) -> str | None:
+    if isinstance(node, exp.Cast):
+        return None
+    lowered = (node.name if isinstance(node, exp.Anonymous) else node.sql_name() or "").lower()
+    if lowered and lowered != ANONYMOUS and lowered not in ALLOWED_FUNCTIONS:
+        return lowered
+    return None
 
 
 def like_pattern(value: str) -> str:
     return value.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
 
 
-def statement_for(plan: "QueryPlan", graph: "SchemaGraph", schema: str) -> Statement:
+def statement_for(plan: "Plan", graph: "SchemaGraph", schema: str) -> Statement:
     sql, params = _compose(plan, graph)
     validated = validate(sql, graph, schema)
     return Statement(sql=validated.sql, params=params)
 
 
-def _compose(plan: "QueryPlan", graph: "SchemaGraph") -> tuple[str, tuple[str, ...]]:
+def _compose(plan: "Plan", graph: "SchemaGraph") -> tuple[str, tuple[str, ...]]:
     binder = _Binder()
     group = f" GROUP BY {', '.join(quote(c) for c in plan.group_by)}" if plan.group_by else ""
     order = ""
@@ -128,11 +93,11 @@ def _compose(plan: "QueryPlan", graph: "SchemaGraph") -> tuple[str, tuple[str, .
     return sql, tuple(binder.params)
 
 
-def _projection(plan: "QueryPlan", graph: "SchemaGraph") -> str:
+def _projection(plan: "Plan", graph: "SchemaGraph") -> str:
     if plan.intent is QueryIntent.count:
         return f"COUNT(*) AS {COUNT_ALIAS}"
 
-    if plan.intent is QueryIntent.aggregate:
+    if plan.intent in MEASURED_INTENTS:
         assert plan.measure_function is not None
         measure_sql = f"COUNT(*) AS {COUNT_ALIAS}"
         if plan.measure_function is not MeasureFunction.count:
@@ -155,7 +120,7 @@ def _projection(plan: "QueryPlan", graph: "SchemaGraph") -> str:
     return ", ".join(quote(column.name) for column in table.columns)
 
 
-def _where(plan: "QueryPlan", binder: "_Binder") -> str:
+def _where(plan: "Plan", binder: "_Binder") -> str:
     clauses: list[str] = []
 
     if plan.filter_column:
@@ -217,11 +182,13 @@ def validate(sql: str, graph: "SchemaGraph | None", schema: str) -> Statement:
             logger.debug("guard: rejected; it contains a %s node", node.__name__)
             raise SecurityError(f"Blocked operation: {node.__name__}")
 
-    for func_node in list(tree.find_all(exp.Func)) + list(tree.find_all(exp.Anonymous)):
-        for name in _function_names(func_node):
-            if name in FORBIDDEN_FUNCTIONS:
-                logger.debug("guard: rejected; it calls the %s function", name)
-                raise SecurityError(f"Blocked function: {name}")
+    for func_node in tree.find_all(exp.Func):
+        function = _unallowed_function(func_node)
+        if function:
+            logger.debug("guard: rejected; it calls the %s function", function)
+            raise SecurityError(
+                f"Statement calls a function outside the plan vocabulary: {function}."
+            )
 
     if graph and graph.tables:
         known = {name.lower() for name in graph.tables}
@@ -243,10 +210,9 @@ def validate(sql: str, graph: "SchemaGraph | None", schema: str) -> Statement:
     limit = tree.find(exp.Limit)
     rewritten = False
     if limit is None:
-        if not _is_aggregate(tree):
-            tree = tree.limit(DEFAULT_LIMIT)
-            rewritten = True
-            logger.debug("guard: the statement carried no limit; adding %d", DEFAULT_LIMIT)
+        tree = tree.limit(DEFAULT_LIMIT)
+        rewritten = True
+        logger.debug("guard: the statement carried no limit; adding %d", DEFAULT_LIMIT)
     elif isinstance(limit.expression, exp.Literal) and limit.expression.is_int:
         try:
             value = int(limit.expression.this)
@@ -260,14 +226,18 @@ def validate(sql: str, graph: "SchemaGraph | None", schema: str) -> Statement:
                 value,
                 MAX_LIMIT,
             )
+    else:
+        limit.set("expression", exp.Literal.number(DEFAULT_LIMIT))
+        rewritten = True
+        logger.debug("guard: the limit was not an integer literal; setting %d", DEFAULT_LIMIT)
 
     if not rewritten:
         logger.debug("guard: statement accepted unchanged")
         return Statement(statement)
 
-    if _rewrites_meaning(tree, statement):
+    if tree.find(exp.NullSafeEQ):
         logger.debug("guard: rejected; the rewrite would change the meaning of the statement")
-        raise SecurityError("Statement uses an operator this validator cannot render faithfully.")
+        raise SecurityError("Statement uses an operator the Guard cannot express faithfully.")
 
     logger.debug("guard: statement accepted; a limit was added or clamped")
     return Statement(tree.sql(dialect=DIALECT))

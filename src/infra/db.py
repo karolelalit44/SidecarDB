@@ -8,18 +8,17 @@ from core.constants import (
     DB_CONNECT_RETRIES,
     DB_MAX_INACTIVE_CONNECTION_LIFETIME,
     INTROSPECTION_TIMEOUT_SECONDS,
+    MS_PER_SECOND,
     POOL_MAX_SIZE,
     POOL_MIN_SIZE,
     SANDBOX_IDLE_TIMEOUT_MS,
     SANDBOX_STATEMENT_TIMEOUT_SECONDS,
 )
-from core.exceptions import ConfigurationError, SchemaError
+from core.exceptions import CatalogError, ConfigurationError
 from utils.logging_config import get_logger
 from utils.sql import quote_literal
 
 logger = get_logger("db")
-
-MS_PER_SECOND = 1000
 
 _BACKOFF_FACTOR = 2
 
@@ -171,13 +170,13 @@ class Database:
                 self._read_catalog(), timeout=INTROSPECTION_TIMEOUT_SECONDS
             )
         except TimeoutError as exc:
-            raise SchemaError(
+            raise CatalogError(
                 f"Catalog introspection exceeded {INTROSPECTION_TIMEOUT_SECONDS}s."
             ) from exc
-        except SchemaError:
+        except CatalogError:
             raise
         except Exception as exc:
-            raise SchemaError(f"Catalog introspection failed: {exc}") from exc
+            raise CatalogError(f"Catalog introspection failed: {exc}") from exc
         logger.debug(
             "db: introspected %d tables and %d columns in %d ms",
             len(graph.tables),
@@ -206,17 +205,17 @@ class Database:
                 }
             )
 
-        graph: dict[str, TableInfo] = {}
+        tables_by_name: dict[str, TableInfo] = {}
         for row in tables:
             name = row["name"]
-            graph[name] = TableInfo(
+            tables_by_name[name] = TableInfo(
                 name=name,
                 description=row["description"],
                 columns=columns_by_table.get(name, []),
                 row_estimate=max(int(row["row_estimate"] or 0), 0),
             )
 
-        return SchemaGraph(tables=graph)
+        return SchemaGraph(tables=tables_by_name)
 
     async def ping(self) -> bool:
         if not self.connected:

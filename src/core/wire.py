@@ -13,11 +13,11 @@ EMBEDDING_OFF = "disabled"
 
 
 class SearchRequest(BaseModel):
-    query: str
+    question: str
 
 
 class SearchResponse(BaseModel):
-    query: str
+    question: str
     answer: str
     sql: str | None = None
     row_count: int = 0
