@@ -1,31 +1,135 @@
-import time
-from typing import TYPE_CHECKING, NamedTuple
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import TYPE_CHECKING
+from unicodedata import category
 
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
-from core.config import Settings
+from core.catalog import SchemaGraph
 from core.constants import (
-    COMPARISON_OPERATORS,
-    COUNT_ALIAS,
-    DEFAULT_COMPARISON,
-    EQUALITY_ALIASES,
-    NULL_TESTS,
-    OPERATORS,
-    PATTERN_OPERATORS,
+    ERROR_MESSAGE_MAX_CHARS,
+    LLM_CHARS_PER_TOKEN,
+    LLM_CONTEXT_TOKENS,
+    LLM_MAX_TOKENS,
+    LLM_REPAIR_TEMPERATURE,
+    LLM_TEMPERATURE,
+    MAX_PLAN_ATTEMPTS,
+    MAX_SCHEMA_COLUMNS,
+    MAX_SCHEMA_TABLES,
+    REDACT_CATALOG_IN_ERRORS,
+    REPAIR_CHAR_BUDGET,
+    RETRIEVAL_MIN_SCORE,
+    RETRIEVAL_SCORE_PRECISION,
+    RETRIEVAL_TOP_K,
 )
-from core.exceptions import ConfigurationError, ExecutionError, PlanningError, ProviderError
-from core.logging_config import get_logger
-from core.types import MeasureFunction, QueryIntent, QueryPlan, RetrievalMode, SchemaGraph
-from infra.llm import prompt_chars, trim
-
-from . import render
+from core.exceptions import ConfigurationError, PlanningError, ProviderError
+from core.retrieval import RetrievalMode
+from utils.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from core.retrieval import SchemaIndex
-    from infra.execute import Executor
-    from infra.llm import LLMClient
+    from core.capabilities import Planner
 
-logger = get_logger("graph")
+logger = get_logger("plan")
+
+
+class QueryIntent(StrEnum):
+    count = "count"  # type: ignore[assignment]
+    aggregate = "aggregate"
+    retrieve = "retrieve"
+    distinct = "distinct"
+
+
+class MeasureFunction(StrEnum):
+    sum = "sum"
+    avg = "avg"
+    min = "min"
+    max = "max"
+    count = "count"  # type: ignore[assignment]
+
+    @property
+    def needs_column(self) -> bool:
+        return self is not MeasureFunction.count
+
+
+class QueryPlan(BaseModel):
+    intent: QueryIntent
+    table: str
+    measure_column: str | None = None
+    measure_function: MeasureFunction | None = None
+    filter_column: str | None = None
+    filter_value: str | None = None
+    filter_operator: str | None = None
+    projection: list[str] = Field(default_factory=list)
+    order_by: str | None = None
+    descending: bool = False
+    group_by: list[str] = Field(default_factory=list)
+    text_search_columns: list[str] = Field(default_factory=list)
+    text_search_query: str | None = None
+    template: str | None = Field(default=None, max_length=200)
+
+    @field_validator("projection", "group_by", "text_search_columns", mode="before")
+    @classmethod
+    def _coerce_list(cls, value: object) -> object:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            if not value.strip():
+                return []
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("order_by", mode="before")
+    @classmethod
+    def _coerce_order_by(cls, value: object) -> object:
+        if isinstance(value, list):
+            return str(value[0]) if value else None
+        return value
+
+
+@dataclass(frozen=True, slots=True)
+class PlanPolicy:
+    llm_temperature: float = LLM_TEMPERATURE
+    llm_repair_temperature: float = LLM_REPAIR_TEMPERATURE
+    repair_char_budget: int = REPAIR_CHAR_BUDGET
+    max_plan_attempts: int = MAX_PLAN_ATTEMPTS
+    error_message_max_chars: int = ERROR_MESSAGE_MAX_CHARS
+    llm_max_tokens: int = LLM_MAX_TOKENS
+    llm_chars_per_token: int = LLM_CHARS_PER_TOKEN
+    llm_context_tokens: int = LLM_CONTEXT_TOKENS
+    max_schema_tables: int = MAX_SCHEMA_TABLES
+    max_schema_columns: int = MAX_SCHEMA_COLUMNS
+    retrieval_top_k: int = RETRIEVAL_TOP_K
+    retrieval_min_score: float = RETRIEVAL_MIN_SCORE
+    retrieval_score_precision: int = RETRIEVAL_SCORE_PRECISION
+
+
+@dataclass(frozen=True, slots=True)
+class Statement:
+    sql: str
+    params: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class Outcome:
+    plan: QueryPlan
+    statement: Statement
+    rows: list[dict]
+    retrieved_tables: list[str]
+    retrieval_mode: RetrievalMode
+
+
+COMPARISON_OPERATORS = ("=", "!=", "<>", "<", "<=", ">", ">=")
+PATTERN_OPERATORS = ("LIKE", "ILIKE")
+NULL_TESTS = ("IS NULL", "IS NOT NULL")
+OPERATORS = (*COMPARISON_OPERATORS, *PATTERN_OPERATORS, *NULL_TESTS)
+
+DEFAULT_COMPARISON = COMPARISON_OPERATORS[0]
+
+EQUALITY_ALIASES = ("==",)
+
+COUNT_ALIAS = "record_count"
+
+WILDCARD = "*"
 
 OPERATOR_TEXT = (
     f"a comparison ({', '.join(repr(op) for op in COMPARISON_OPERATORS)}), "
@@ -56,7 +160,7 @@ Field contracts:
   measure_function requires measure_column, which must be of a numeric type.
 - filter_column / filter_value / filter_operator: a predicate on one column.
   filter_operator is {OPERATOR_TEXT}. Use '=' (never '==') for equality.
-  Pattern operators need filter_value; null tests must leave it unset.
+  Pattern and comparison operators need filter_value; null tests must leave it unset.
 - text_search_query / text_search_columns: use these instead of filter_column when
   the question supplies wording to be found inside the content of a text column.
 - projection: the columns to return. Prefer human-readable descriptor columns over
@@ -97,16 +201,7 @@ answering. If a column was rejected, pick only from the available columns.
 Read the field contracts above.
 """
 
-
-class Outcome(NamedTuple):
-    """What one completed search produced."""
-
-    plan: QueryPlan
-    sql: str
-    params: tuple[str, ...]
-    rows: list[dict]
-    retrieved_tables: list[str]
-    retrieval_mode: RetrievalMode
+TRUNCATION_MARK = " [...]"
 
 
 def column_scope(plan: QueryPlan, graph: SchemaGraph) -> set[str]:
@@ -114,7 +209,7 @@ def column_scope(plan: QueryPlan, graph: SchemaGraph) -> set[str]:
     return set(info.column_names) if info is not None else set()
 
 
-def normalise_plan(plan: QueryPlan, graph: SchemaGraph, settings: Settings) -> QueryPlan:
+def normalise_plan(plan: QueryPlan, graph: SchemaGraph, policy: PlanPolicy) -> QueryPlan:
     available = column_scope(plan, graph)
 
     def fix(column: str | None) -> str | None:
@@ -127,17 +222,6 @@ def normalise_plan(plan: QueryPlan, graph: SchemaGraph, settings: Settings) -> Q
         tail_stripped = tail.strip('"` ')
         if dot and tail_stripped in available:
             return tail_stripped
-        lowered = column.lower()
-        if "creat" in lowered or "time" in lowered or "date" in lowered:
-            table_info = graph.tables.get(plan.table)
-            if table_info:
-                for c in table_info.columns:
-                    if c.name in available and (
-                        c.type_category == "D"
-                        or "time" in c.data_type.lower()
-                        or "date" in c.data_type.lower()
-                    ):
-                        return c.name
         return column
 
     def fix_all(columns: list[str]) -> list[str]:
@@ -152,7 +236,7 @@ def normalise_plan(plan: QueryPlan, graph: SchemaGraph, settings: Settings) -> Q
         if not tpl:
             return None
         cleaned = " ".join(tpl.strip().split())
-        return cleaned[: settings.error_message_max_chars]
+        return cleaned[: policy.error_message_max_chars]
 
     order_by = plan.order_by
     descending = plan.descending
@@ -172,6 +256,7 @@ def normalise_plan(plan: QueryPlan, graph: SchemaGraph, settings: Settings) -> Q
         order_by = fix(order_by)
         if order_by not in available:
             order_by = None
+            descending = False
 
     if plan.intent is QueryIntent.count:
         order_by = None
@@ -184,21 +269,7 @@ def normalise_plan(plan: QueryPlan, graph: SchemaGraph, settings: Settings) -> Q
         filter_operator = DEFAULT_COMPARISON
 
     filter_column = fix(plan.filter_column)
-    filter_value = plan.filter_value
     group_by = fix_all(plan.group_by) if plan.intent is QueryIntent.aggregate else []
-
-    if (
-        plan.intent is QueryIntent.aggregate
-        and not group_by
-        and filter_column in available
-        and filter_value is None
-    ):
-        group_by = [filter_column]
-        filter_column = None
-        filter_operator = None
-    elif filter_column and filter_value is None and filter_operator not in NULL_TESTS:
-        filter_column = None
-        filter_operator = None
 
     updates = {
         "filter_column": filter_column,
@@ -223,7 +294,7 @@ def normalise_plan(plan: QueryPlan, graph: SchemaGraph, settings: Settings) -> Q
     return plan.model_copy(update=updates)
 
 
-def check_plan(plan: QueryPlan, graph: SchemaGraph, settings: Settings) -> str | None:
+def check_plan(plan: QueryPlan, graph: SchemaGraph, policy: PlanPolicy) -> str | None:
     if plan.table not in graph.tables:
         return f"table '{plan.table}' does not exist in the schema"
 
@@ -231,17 +302,23 @@ def check_plan(plan: QueryPlan, graph: SchemaGraph, settings: Settings) -> str |
 
     for value in (plan.measure_column, plan.filter_column, plan.order_by):
         if value and value not in available:
-            return _unknown_column(value, available, settings)
+            return _unknown_column(value, available, policy)
 
     for value in (*plan.projection, *plan.group_by, *plan.text_search_columns):
         if value not in available:
-            return _unknown_column(value, available, settings)
+            return _unknown_column(value, available, policy)
 
     if plan.filter_column and not plan.filter_operator:
         return "a filter column requires filter_operator"
 
     if plan.filter_operator and plan.filter_operator not in OPERATORS:
         return "unsupported filter operator; use one of " + ", ".join(OPERATORS)
+
+    if plan.filter_column and plan.filter_value is None and plan.filter_operator not in NULL_TESTS:
+        return (
+            "a filter column without filter_value is not a predicate; "
+            "supply filter_value or leave the filter fields unset"
+        )
 
     if plan.intent is QueryIntent.aggregate:
         if not plan.measure_function:
@@ -258,57 +335,53 @@ def check_plan(plan: QueryPlan, graph: SchemaGraph, settings: Settings) -> str |
     return None
 
 
-def _unknown_column(value: str, available: set[str], settings: Settings) -> str:
-    """Return error message listing available columns for repair."""
-    listing = ", ".join(sorted(available)[: settings.max_schema_columns])
+def _unknown_column(value: str, available: set[str], policy: PlanPolicy) -> str:
+    listing = ", ".join(sorted(available)[: policy.max_schema_columns])
     return f"column '{value}' does not exist; available columns are: {listing}"
 
 
-def redact(reason: str, settings: Settings) -> str:
-    if not settings.redact_catalog_in_errors:
+def redact(reason: str) -> str:
+    if not REDACT_CATALOG_IN_ERRORS:
         return reason
     return reason.split(";")[0].strip()
 
 
-def _elapsed_ms(started: float) -> int:
-    """Whole milliseconds since a perf_counter reading."""
-    return int((time.perf_counter() - started) * 1000)
+def prompt_chars(reserve: int, policy: PlanPolicy) -> int:
+    return max(policy.llm_context_tokens - reserve, 0) * policy.llm_chars_per_token
 
 
-async def link(
-    question: str, graph: SchemaGraph, index: "SchemaIndex | None", settings: Settings
-) -> tuple[list[str], RetrievalMode, list[str]]:
-    if index is not None:
-        tables = await index.tables_for(
-            question, settings.max_schema_tables, settings.retrieval_min_score
-        )
-        if tables:
-            return tables, RetrievalMode.embedding, tables
+def trim(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    if limit <= len(TRUNCATION_MARK):
+        return text[:limit]
+    return text[: limit - len(TRUNCATION_MARK)] + TRUNCATION_MARK
 
-    logger.debug(
-        "link: no embedding match at or above %s; falling back to catalog order",
-        settings.retrieval_min_score,
-    )
-    ordered = sorted(graph.tables.values(), key=lambda t: t.row_estimate, reverse=True)
-    names = [t.name for t in ordered[: settings.max_schema_tables]]
-    return names, RetrievalMode.catalog, []
+
+def build_prompt(question: str, graph: SchemaGraph, tables: list[str], policy: PlanPolicy) -> str:
+    reserve = policy.llm_max_tokens + len(SYSTEM) // policy.llm_chars_per_token
+    budget = prompt_chars(reserve, policy)
+    schema_overhead = len(USER) - len("{schema}") - len("{question}")
+
+    schema = trim(graph.describe(tables, policy.max_schema_columns), budget - schema_overhead)
+
+    return USER.format(schema=schema, question=question)
 
 
 async def plan(
     question: str,
     graph: SchemaGraph,
     tables: list[str],
-    settings: Settings,
-    llm: "LLMClient",
+    policy: PlanPolicy,
+    llm: "Planner",
     error: str | None = None,
     attempt: int = 0,
 ) -> tuple[QueryPlan | None, str | None]:
-    """Execute one query planning attempt, with repair prompt if retrying."""
-    prompt = build_prompt(question, graph, tables, settings)
+    prompt = build_prompt(question, graph, tables, policy)
     if error:
-        prompt = f"{REPAIR.format(error=error[: settings.repair_char_budget])}\n\n{prompt}"
+        prompt = f"{REPAIR.format(error=error[: policy.repair_char_budget])}\n\n{prompt}"
 
-    temperature = settings.llm_temperature if attempt == 0 else settings.llm_repair_temperature
+    temperature = policy.llm_temperature if attempt == 0 else policy.llm_repair_temperature
 
     logger.debug(
         "Planning attempt %d: tables=%d prompt_chars=%d temperature=%s repairing=%s",
@@ -322,19 +395,17 @@ async def plan(
     try:
         payload = await llm.complete_json(SYSTEM, prompt, temperature)
         logger.debug("Plan payload: %s", payload)
-        result = normalise_plan(QueryPlan.model_validate(payload), graph, settings)
+        result = normalise_plan(QueryPlan.model_validate(payload), graph, policy)
     except (ConfigurationError, ProviderError):
-        # A misconfigured or unreachable provider is not a bad plan; retrying
-        # it as one would burn every attempt on the same outage.
         raise
     except (PlanningError, ValidationError) as exc:
         logger.debug("Plan malformed: %s: %s", type(exc).__name__, exc)
-        return None, " ".join(str(exc).split())[: settings.error_message_max_chars]
+        return None, " ".join(str(exc).split())[: policy.error_message_max_chars]
     except Exception as exc:
         logger.warning("Planner call failed: %s: %s", type(exc).__name__, exc)
         return None, "a usable plan could not be produced"
 
-    reason = check_plan(result, graph, settings)
+    reason = check_plan(result, graph, policy)
     if reason:
         logger.debug(
             "Plan rejected: %s (intent=%s table=%s)",
@@ -359,84 +430,26 @@ async def plan(
     return result, None
 
 
-def build_prompt(question: str, graph: SchemaGraph, tables: list[str], settings: Settings) -> str:
-    """Assemble the planner prompt bounded by LLM context budget."""
-    reserve = settings.llm_max_tokens + len(SYSTEM) // settings.llm_chars_per_token
-    budget = prompt_chars(reserve, settings)
-    schema_overhead = len(USER) - len("{schema}") - len("{question}")
-
-    schema = trim(graph.describe(tables, settings.max_schema_columns), budget - schema_overhead)
-
-    return USER.format(schema=schema, question=question)
+_DISALLOWED_SUBSTRINGS = ("--", "/*", "*/", ";", "\0")
+_ALLOWED_CONTROL = ("\t", "\n", "\r")
+_BLOCKED_CATEGORIES = ("Cc", "Cf", "Cs")
 
 
-async def run(
-    question: str,
-    graph: SchemaGraph,
-    index: "SchemaIndex | None",
-    settings: Settings,
-    llm: "LLMClient",
-    executor: "Executor",
-) -> Outcome:
-    """Execute query generation pipeline: link -> plan -> render -> run."""
-    logger.debug("run: planning for %r", question)
-    stage = time.perf_counter()
-    tables, retrieval_mode, retrieved_tables = await link(question, graph, index, settings)
-    linked_ms = _elapsed_ms(stage)
-    logger.debug(
-        "link: mode=%s tables=%s in %d ms",
-        retrieval_mode.value,
-        tables,
-        linked_ms,
-    )
+def check_question(text: str) -> str | None:
+    if not text:
+        return "The question is empty."
 
-    plan_result = None
-    error = None
-    for attempt in range(settings.max_plan_attempts):
-        plan_result, error = await plan(question, graph, tables, settings, llm, error, attempt)
-        if plan_result is not None:
-            break
-        logger.debug(
-            "plan: attempt %d of %d failed: %s",
-            attempt + 1,
-            settings.max_plan_attempts,
-            error,
-        )
+    for marker in _DISALLOWED_SUBSTRINGS:
+        if marker in text:
+            return "The question contains disallowed symbols or comment characters."
 
-    if plan_result is None:
-        logger.error("No plan survived %d attempts: %s", settings.max_plan_attempts, error)
-        raise PlanningError(redact(error or "No valid plan was produced.", settings))
+    for ch in text:
+        if ch in _ALLOWED_CONTROL:
+            continue
+        if category(ch) in _BLOCKED_CATEGORIES:
+            return "The question contains unsupported control or formatting characters."
 
-    try:
-        rendered = render.build(plan_result, graph)
-        sql = executor.prepare(rendered, graph)
-    except Exception as exc:
-        logger.warning("Render failed: %s: %s", type(exc).__name__, exc)
-        raise PlanningError(redact(str(exc), settings)) from exc
+    if not any(ch.isalnum() for ch in text):
+        return "The question must contain at least one alphanumeric character."
 
-    logger.debug("render: %s (%d bound parameter(s))", sql, len(rendered.params))
-
-    # An execution failure surfaces as itself, never as an empty result set:
-    # "the query failed" and "no rows matched" are different answers.
-    try:
-        rows = await executor.run(sql, *rendered.params)
-    except ExecutionError as exc:
-        logger.warning("Execution failed: %s", exc)
-        raise
-
-    logger.debug(
-        "run: finished mode=%s tables=%d rows=%d in %d ms",
-        retrieval_mode.value,
-        len(tables),
-        len(rows),
-        _elapsed_ms(stage),
-    )
-
-    return Outcome(
-        plan=plan_result,
-        sql=sql,
-        params=rendered.params,
-        rows=rows,
-        retrieved_tables=retrieved_tables,
-        retrieval_mode=retrieval_mode,
-    )
+    return None

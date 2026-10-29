@@ -1,23 +1,35 @@
 import time
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from pydantic import BaseModel
+
+from core.catalog import SchemaGraph, TableInfo
 from core.exceptions import EmbeddingError
-from core.logging_config import get_logger
-from core.types import Hit, SchemaGraph, TableInfo
+from utils.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from core.config import Settings
-    from infra.embeddings import Embedder
+    from core.capabilities import Embedder
+    from core.plan import PlanPolicy
 
 logger = get_logger("retrieval")
 
 
-class SchemaIndex:
-    """Ranks catalog tables and columns against an incoming question."""
+class RetrievalMode(StrEnum):
+    embedding = "embedding"
+    catalog = "catalog"
 
-    def __init__(self, embedder: "Embedder", settings: "Settings") -> None:
+
+class Hit(BaseModel):
+    table: str
+    subject: str
+    score: float
+
+
+class SchemaIndex:
+    def __init__(self, embedder: "Embedder", policy: "PlanPolicy") -> None:
         self._embedder = embedder
-        self._settings = settings
+        self._policy = policy
         self._keys: list[str] = []
         self._texts: list[str] = []
         self._vectors: list[list[float]] | None = None
@@ -75,7 +87,7 @@ class SchemaIndex:
             logger.warning("Query embedding failed: %s", exc)
             return []
 
-        precision = self._settings.retrieval_score_precision
+        precision = self._policy.retrieval_score_precision
         hits = [
             Hit(
                 table=self._table_of[key],
@@ -97,7 +109,7 @@ class SchemaIndex:
 
     async def tables_for(self, question: str, limit: int, min_score: float) -> list[str]:
         best: dict[str, float] = {}
-        for hit in await self.search(question, self._settings.retrieval_top_k):
+        for hit in await self.search(question, self._policy.retrieval_top_k):
             if hit.score < min_score:
                 continue
             if hit.table not in best or hit.score > best[hit.table]:
@@ -115,8 +127,29 @@ class SchemaIndex:
         return [name for name, _score in chosen]
 
 
+async def link(
+    question: str,
+    graph: SchemaGraph,
+    index: "SchemaIndex | None",
+    policy: "PlanPolicy",
+) -> tuple[list[str], RetrievalMode, list[str]]:
+    if index is not None:
+        tables = await index.tables_for(
+            question, policy.max_schema_tables, policy.retrieval_min_score
+        )
+        if tables:
+            return tables, RetrievalMode.embedding, tables
+
+    logger.debug(
+        "link: no embedding match at or above %s; falling back to catalog order",
+        policy.retrieval_min_score,
+    )
+    ordered = sorted(graph.tables.values(), key=lambda t: t.row_estimate, reverse=True)
+    names = [t.name for t in ordered[: policy.max_schema_tables]]
+    return names, RetrievalMode.catalog, []
+
+
 def dot(a: list[float], b: list[float]) -> float:
-    """Both operands are unit vectors, so cosine is the dot product."""
     return sum(x * y for x, y in zip(a, b, strict=True))
 
 
@@ -141,3 +174,6 @@ def _describe_column(table: TableInfo, column) -> str:
     if table.description:
         parts.append(table.description)
     return " | ".join(parts)
+
+
+__all__ = ["Hit", "RetrievalMode", "SchemaIndex", "link"]

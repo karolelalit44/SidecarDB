@@ -1,9 +1,4 @@
 #!/usr/bin/env bash
-# Creates the sandboxed, read-only role the engine connects as.
-#
-# Runs once, inside the PostgreSQL container, during first-time database
-# initialisation. The password arrives as an environment variable so no
-# credential lives in this repository.
 set -euo pipefail
 
 : "${NL_SEARCH_USER:?NL_SEARCH_USER must be set}"

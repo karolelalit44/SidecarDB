@@ -1,8 +1,8 @@
-# askdb
+# sidecarDB
 
 **Ask a PostgreSQL database a question in plain English and get the rows back — safely.**
 
-`askdb` is a plug-and-play natural-language search engine for PostgreSQL. It introspects your
+`sidecarDB` is a plug-and-play natural-language search engine for PostgreSQL. It introspects your
 schema at runtime, lets a language model *plan* a query as a constrained JSON object (never raw
 SQL), validates that plan against an AST guard and your live catalog, executes it inside a
 read-only sandbox with bound parameters, and returns the rows with a plain-English answer.
@@ -17,17 +17,17 @@ question → schema retrieval → LLM planner (JSON plan) → AST guard → sand
 ## Install
 
 ```bash
-pip install askdb
+pip install sidecardb
 # optional: local embedding models (pulls torch, several GB)
-pip install 'askdb[embeddings]'
+pip install 'sidecardb[embeddings]'
 ```
 
 ## Use it as a library
 
 ```python
-from core import AskDB
+from core import SidecarDB
 
-async with AskDB(
+async with SidecarDB(
     database_url="postgresql://reader@localhost:5432/sales",
     llm_api_key="sk-...",
 ) as db:
@@ -36,8 +36,10 @@ async with AskDB(
     print(answer.records)     # the rows
 ```
 
-Two required values; everything else has production-sane defaults. You can also pass
-environment variables instead of keywords — the instance starts from the environment and an
+Two required values; every other knob is fixed inside the package (`core/constants.py`), so
+behaviour cannot drift between different databases or model providers. The environment exists only
+for deployment-specific values: the database settings, the model provider settings, and secrets. You
+can pass them as keywords or environment variables — the instance starts from the environment and an
 optional `.env` file, exactly like pydantic-settings.
 
 ## Run it as a service
@@ -45,7 +47,7 @@ optional `.env` file, exactly like pydantic-settings.
 ```bash
 export DATABASE_URL=postgresql://reader@localhost:5432/sales
 export LLM_API_KEY=sk-...
-askdb serve --port 8000
+sidecardb serve --port 8000
 # or: uvicorn 'core.server:create_app' --factory
 ```
 
@@ -56,8 +58,8 @@ askdb serve --port 8000
 | POST   | `/api/v1/search`           | `{"query": "..."}` → answer + rows        |
 | GET    | `/docs`                    | OpenAPI UI                                |
 
-Every setting is documented in [`.env.example`](.env.example); the defaults shown there apply
-when a key is absent.
+Every settable key is documented in [`.env.example`](.env.example). Behaviour constants live in
+[`src/core/constants.py`](src/core/constants.py).
 
 ## Docker
 
@@ -68,6 +70,20 @@ docker compose up --build
 
 The compose stack starts a pgvector PostgreSQL seeded with a demo schema **and creates a
 dedicated read-only role** — no credential is committed to this repository.
+
+## Provisioning the read-only role
+
+On an existing database, provision the same sandboxed role yourself:
+
+```bash
+sidecardb setup-roles \
+  --admin-dsn postgresql://postgres:pw@localhost:5435/sidecardb_demo \
+  --role nl_search_user --schema public
+```
+
+The password comes from `--password` or the `DB_PASSWORD` environment variable. The identical
+provisioning also ships as [`src/ops/setup_roles.sh`](src/ops/setup_roles.sh),
+which the compose stack mounts into the PostgreSQL container's first-boot init directory.
 
 ## Security model
 
@@ -88,11 +104,13 @@ data:
 5. **Sandboxed execution**: read-only session + read-only transaction + `statement_timeout` +
    `idle_in_transaction_session_timeout` + row cap.
 6. **Database role**: run as a role with `SELECT` only and
-   `default_transaction_read_only = on` (see `artifacts/setup_roles.sh`).
+   `default_transaction_read_only = on` — provision it with `sidecardb setup-roles`
+   (see `src/ops/setup_roles.sh`).
 
 Operational hardening: optional API-key auth (`API_KEYS`), per-client rate limiting, request
 body caps, request-id sanitisation, catalog names redacted from errors, and generated SQL
-withheld from responses unless you opt in (`EXPOSE_SQL=true`).
+withheld from responses (the disclosure switches are package constants, not environment
+options).
 
 > Use a dedicated read-only database role. The sandbox is defense in depth, not a substitute
 > for database-level privileges.
@@ -100,9 +118,10 @@ withheld from responses unless you opt in (`EXPOSE_SQL=true`).
 ## Production checklist
 
 - Set `API_KEYS` to one or more secrets (`python -c "import secrets; print(secrets.token_urlsafe(32))"`).
-- Connect through a **read-only role**; grant `SELECT` only.
+- Connect through a **read-only role**; grant `SELECT` only (`sidecardb setup-roles`).
 - Set `DB_SSL=require` (or stronger) for any remote database.
-- Keep `EXPOSE_SQL=false` and `REDACT_CATALOG_IN_ERRORS=true` unless callers are trusted.
+- SQL disclosure and catalog redaction are package constants (`EXPOSE_SQL = False`,
+  `REDACT_CATALOG_IN_ERRORS = True`); change them in code only for fully trusted callers.
 - Terminate TLS and enforce global rate limits at your edge; the built-in limiter is
   per-process.
 - Point `LLM_BASE_URL`/`LLM_MODEL` at a provider you trust; questions and schema summaries are
@@ -119,7 +138,9 @@ withheld from responses unless you opt in (`EXPOSE_SQL=true`).
    response (`retrieval_mode`).
 3. **Plan** — one LLM call produces a JSON plan; rejected plans are retried with the rejection
    reason at a higher sampling temperature.
-4. **Render & guard** — the plan becomes a parameterized `SELECT`, validated by the AST guard.
+4. **Guard & compose** — the accepted plan is composed into a parameterized
+   `SELECT` with a `LIMIT`; the composed statement (and every caller-supplied
+   statement) is re-validated by the AST guard before it can run.
 5. **Execute & answer** — rows run through the sandbox, then a model-written sentence template
    is bound to the actual values. Execution failures surface as errors (`502`), never as "no
    records found".
@@ -129,13 +150,12 @@ withheld from responses unless you opt in (`EXPOSE_SQL=true`).
 ```bash
 python -m venv .venv && .venv\Scripts\activate    # or source .venv/bin/activate
 pip install -e '.[dev]'
-pytest                    # unit tests, no database or model needed
-ruff check src tests && ruff format src tests
+ruff check src && ruff format src
 mypy
 ```
 
-Integration tests live behind the `integration` marker and need a real PostgreSQL; CI runs
-lint, typecheck, tests, package build and a Docker build on every push.
+`docker compose up` provisions a demo PostgreSQL: on first boot it runs `artifacts/init_schema.sql`
+against the configured schema.
 
 ## License
 

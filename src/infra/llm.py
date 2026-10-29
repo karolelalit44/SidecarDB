@@ -8,39 +8,54 @@ from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
 from core.constants import (
-    COMPLETION_TOKENS_FIELD,
-    FENCE,
-    FINISH_REASON_FIELD,
-    FINISH_REASON_LENGTH,
-    JSON_INSTRUCTION,
-    JSON_TAG,
-    METADATA_SOURCES,
-    PROMPT_TOKENS_FIELD,
-    REASONING_BUDGET_WARNING,
-    REASONING_EMPTY_RESPONSE,
-    REASONING_FIELD,
-    SERVED_MODEL_FIELD,
-    TRUNCATION_MARK,
-    USAGE_FIELD,
+    LLM_MAX_TOKENS,
+    LLM_RETRIES,
+    LLM_TEMPERATURE,
+    LLM_TIMEOUT_SECONDS,
+    LOG_LLM_PAYLOADS,
 )
 from core.exceptions import ConfigurationError, PlanningError, ProviderError
-from core.logging_config import get_logger
+from utils.logging_config import get_logger
 
 if TYPE_CHECKING:
     from core.config import Settings
 
 logger = get_logger("llm")
 
+FENCE = "```"
+JSON_TAG = "json"
+
+JSON_INSTRUCTION = (
+    "Reply with one JSON object and nothing else. No prose, no explanation, "
+    "no markdown code fences. Start with { and end with }."
+)
+
+METADATA_SOURCES = ("response_metadata", "additional_kwargs")
+
+FINISH_REASON_FIELD = "finish_reason"
+FINISH_REASON_LENGTH = "length"
+REASONING_FIELD = "reasoning_content"
+USAGE_FIELD = "usage_metadata"
+SERVED_MODEL_FIELD = "model_name"
+COMPLETION_TOKENS_FIELD = "output_tokens"
+PROMPT_TOKENS_FIELD = "input_tokens"
+
+REASONING_BUDGET_WARNING = (
+    "The model spent its entire completion budget reasoning and returned no answer. "
+    "Raise the completion budget or turn the model's thinking mode off."
+)
+REASONING_EMPTY_RESPONSE = (
+    "The model used its entire completion budget without returning an answer. "
+    "Raise the completion budget."
+)
+
 
 class LLMClient:
-    """One lazily-opened chat client per instance, so connections are reused."""
-
     def __init__(self, settings: "Settings") -> None:
         self._settings = settings
         self._model: BaseChatModel | None = None
 
     def chat_model(self) -> BaseChatModel:
-        # Outside the cache, so a missing key always surfaces.
         if not self._settings.llm_api_key:
             raise ConfigurationError("LLM_API_KEY is not configured.")
         if self._model is None:
@@ -48,18 +63,14 @@ class LLMClient:
             logger.debug(
                 "llm: opening a client for %s at %s", settings.llm_model, settings.llm_base_url
             )
-            # ChatOpenAI accepts max_tokens at runtime (verified against its
-            # model_fields), but released stubs drift on that field; routing
-            # the drift-prone option through an Any-typed mapping keeps the
-            # call type-clean against any future stub revision.
-            options: dict[str, Any] = {"max_tokens": settings.llm_max_tokens}
+            options: dict[str, Any] = {"max_tokens": LLM_MAX_TOKENS}
             self._model = ChatOpenAI(
                 model=settings.llm_model,
                 base_url=settings.llm_base_url,
                 api_key=SecretStr(settings.llm_api_key),
-                temperature=settings.llm_temperature,
-                timeout=settings.llm_timeout_seconds,
-                max_retries=settings.llm_retries,
+                temperature=LLM_TEMPERATURE,
+                timeout=LLM_TIMEOUT_SECONDS,
+                max_retries=LLM_RETRIES,
                 extra_body=settings.llm_extra_body or None,
                 **options,
             )
@@ -69,11 +80,10 @@ class LLMClient:
         self, system_prompt: str, user_prompt: str, temperature: float | None = None
     ) -> dict[str, Any]:
         settings = self._settings
-        # Outside the try, so ConfigurationError keeps its own meaning.
         model = self.chat_model()
         system_text = f"{system_prompt}\n\n{JSON_INSTRUCTION}"
         started = time.perf_counter()
-        effective = settings.llm_temperature if temperature is None else temperature
+        effective = LLM_TEMPERATURE if temperature is None else temperature
         runnable = model if temperature is None else model.bind(temperature=effective)
 
         logger.debug(
@@ -83,7 +93,7 @@ class LLMClient:
             len(system_text),
             len(user_prompt),
             len(system_text) + len(user_prompt),
-            settings.llm_max_tokens,
+            LLM_MAX_TOKENS,
             effective,
             sorted(settings.llm_extra_body),
         )
@@ -101,7 +111,7 @@ class LLMClient:
                 int((time.perf_counter() - started) * 1000),
                 type(exc).__name__,
                 exc,
-                exc_info=settings.log_llm_payloads,
+                exc_info=LOG_LLM_PAYLOADS,
             )
             raise ProviderError("The model provider could not be reached.") from exc
 
@@ -132,9 +142,9 @@ class LLMClient:
                 len(reasoning),
                 _as_int(usage.get(PROMPT_TOKENS_FIELD)),
                 _as_int(usage.get(COMPLETION_TOKENS_FIELD)),
-                settings.llm_max_tokens,
+                LLM_MAX_TOKENS,
             )
-            if settings.log_llm_payloads and reasoning:
+            if LOG_LLM_PAYLOADS and reasoning:
                 logger.debug("Reasoning scratchpad: %s", reasoning)
             raise PlanningError(_empty_response_message(finish_reason, reasoning))
 
@@ -142,7 +152,7 @@ class LLMClient:
             payload = extract_json(content)
         except PlanningError as exc:
             logger.warning("Unparseable model reply (%d chars): %s", len(content), exc)
-            if settings.log_llm_payloads:
+            if LOG_LLM_PAYLOADS:
                 logger.debug("Raw reply: %s", content)
             raise
 
@@ -218,22 +228,7 @@ def _balanced_end(text: str, start: int) -> int | None:
     return None
 
 
-def prompt_chars(reserve: int, settings: "Settings") -> int:
-    """Characters available for a prompt body on this model."""
-    return max(settings.llm_context_tokens - reserve, 0) * settings.llm_chars_per_token
-
-
-def trim(text: str, limit: int) -> str:
-    """Shortens text to limit characters, marking that it was cut."""
-    if len(text) <= limit:
-        return text
-    if limit <= len(TRUNCATION_MARK):
-        return text[:limit]
-    return text[: limit - len(TRUNCATION_MARK)] + TRUNCATION_MARK
-
-
 def provider_metadata(result: Any) -> dict[str, Any]:
-    """Flatten reply metadata from response_metadata or additional_kwargs."""
     merged: dict[str, Any] = {}
     for source_name in METADATA_SOURCES:
         source = getattr(result, source_name, None)
@@ -257,7 +252,6 @@ def _as_int(value: Any) -> int | None:
 
 
 def _empty_response_message(finish_reason: Any, reasoning: str) -> str:
-    """Generate descriptive error message for an empty model response."""
     if reasoning:
         return REASONING_BUDGET_WARNING
     if finish_reason == FINISH_REASON_LENGTH:

@@ -1,13 +1,27 @@
 import asyncio
 import time
 
+from core.catalog import SchemaGraph, TableInfo
 from core.config import Settings
-from core.constants import BACKOFF_FACTOR, MS_PER_SECOND
+from core.constants import (
+    DB_CONNECT_BACKOFF_SECONDS,
+    DB_CONNECT_RETRIES,
+    DB_MAX_INACTIVE_CONNECTION_LIFETIME,
+    INTROSPECTION_TIMEOUT_SECONDS,
+    POOL_MAX_SIZE,
+    POOL_MIN_SIZE,
+    SANDBOX_IDLE_TIMEOUT_MS,
+    SANDBOX_STATEMENT_TIMEOUT_SECONDS,
+)
 from core.exceptions import ConfigurationError, SchemaError
-from core.logging_config import get_logger
-from core.types import SchemaGraph, TableInfo
+from utils.logging_config import get_logger
+from utils.sql import quote_literal
 
 logger = get_logger("db")
+
+MS_PER_SECOND = 1000
+
+_BACKOFF_FACTOR = 2
 
 _COLUMNS_SQL = """
 SELECT c.relname AS table_name,
@@ -44,15 +58,12 @@ ORDER BY c.relname
 
 
 class Database:
-    """A pooled, sandboxed connection set to one PostgreSQL schema."""
-
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._pool = None
 
     @property
     def connected(self) -> bool:
-        """Whether a live pool is held."""
         return self._pool is not None and not self._pool.is_closing()
 
     @property
@@ -62,16 +73,12 @@ class Database:
         return self._pool
 
     async def connect(self, *, readonly: bool = True, retries: int | None = None) -> None:
-        """Open the pool, retrying with exponential backoff.
-
-        readonly=False is for maintenance scripts that write to the database.
-        """
         if self.connected:
             logger.debug("db: pool already open; reusing it")
             return
 
-        attempts = self._settings.db_connect_retries if retries is None else retries
-        delay = self._settings.db_connect_backoff_seconds
+        attempts = DB_CONNECT_RETRIES if retries is None else retries
+        delay = DB_CONNECT_BACKOFF_SECONDS
         last_error: Exception | None = None
 
         for attempt in range(attempts + 1):
@@ -91,7 +98,7 @@ class Database:
                     delay,
                 )
                 await asyncio.sleep(delay)
-                delay *= BACKOFF_FACTOR
+                delay *= _BACKOFF_FACTOR
 
         logger.error(
             "db: the pool could not be opened: %s: %s", type(last_error).__name__, last_error
@@ -104,20 +111,20 @@ class Database:
         settings = self._settings
 
         async def _init(conn):
-            statement_ms = int(settings.sandbox_statement_timeout_seconds * MS_PER_SECOND)
-            idle_ms = settings.sandbox_idle_timeout_ms
+            statement_ms = int(SANDBOX_STATEMENT_TIMEOUT_SECONDS * MS_PER_SECOND)
+            idle_ms = SANDBOX_IDLE_TIMEOUT_MS
             if readonly:
                 await conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
             await conn.execute(f"SET statement_timeout = '{statement_ms}ms'")
             await conn.execute(f"SET idle_in_transaction_session_timeout = '{idle_ms}ms'")
-            await conn.execute("SET search_path = " + _quote_literal(settings.db_schema))
+            await conn.execute("SET search_path = " + quote_literal(settings.db_schema))
 
         options: dict[str, object] = {
             "dsn": settings.database_url,
-            "min_size": settings.pool_min_size,
-            "max_size": settings.pool_max_size,
-            "command_timeout": settings.sandbox_statement_timeout_seconds,
-            "max_inactive_connection_lifetime": settings.db_max_inactive_connection_lifetime,
+            "min_size": POOL_MIN_SIZE,
+            "max_size": POOL_MAX_SIZE,
+            "command_timeout": SANDBOX_STATEMENT_TIMEOUT_SECONDS,
+            "max_inactive_connection_lifetime": DB_MAX_INACTIVE_CONNECTION_LIFETIME,
             "init": _init,
         }
         if settings.db_ssl:
@@ -129,17 +136,16 @@ class Database:
             "db: pool opened in %d ms (min=%d max=%d readonly=%s "
             "statement_timeout=%ss idle_timeout=%d ms schema=%s ssl=%s)",
             int((time.perf_counter() - started) * MS_PER_SECOND),
-            settings.pool_min_size,
-            settings.pool_max_size,
+            POOL_MIN_SIZE,
+            POOL_MAX_SIZE,
             readonly,
-            settings.sandbox_statement_timeout_seconds,
-            settings.sandbox_idle_timeout_ms,
+            SANDBOX_STATEMENT_TIMEOUT_SECONDS,
+            SANDBOX_IDLE_TIMEOUT_MS,
             settings.db_schema,
             settings.db_ssl or "default",
         )
 
     async def ensure_connected(self) -> None:
-        """Reopen the pool if it was never opened or has gone away."""
         if self.connected:
             return
         logger.debug("db: no live pool; reconnecting on demand")
@@ -152,21 +158,21 @@ class Database:
         self._pool = None
 
     async def introspect(self) -> SchemaGraph:
-        _ = self.pool  # fail fast with ConfigurationError when not connected
+        await self.ensure_connected()
         started = time.perf_counter()
         settings = self._settings
         logger.debug(
             "db: introspecting schema %s with a %ss budget",
             settings.db_schema,
-            settings.introspection_timeout_seconds,
+            INTROSPECTION_TIMEOUT_SECONDS,
         )
         try:
             graph = await asyncio.wait_for(
-                self._read_catalog(), timeout=settings.introspection_timeout_seconds
+                self._read_catalog(), timeout=INTROSPECTION_TIMEOUT_SECONDS
             )
         except TimeoutError as exc:
             raise SchemaError(
-                f"Catalog introspection exceeded {settings.introspection_timeout_seconds}s."
+                f"Catalog introspection exceeded {INTROSPECTION_TIMEOUT_SECONDS}s."
             ) from exc
         except SchemaError:
             raise
@@ -213,7 +219,6 @@ class Database:
         return SchemaGraph(tables=graph)
 
     async def ping(self) -> bool:
-        """Ask the server for a trivial value; the only honest liveness check."""
         if not self.connected:
             logger.debug("db: ping without an open pool reports down")
             return False
@@ -225,7 +230,3 @@ class Database:
         except Exception as exc:
             logger.debug("db: ping failed: %s: %s", type(exc).__name__, exc)
             return False
-
-
-def _quote_literal(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"

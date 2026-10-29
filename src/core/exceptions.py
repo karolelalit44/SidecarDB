@@ -1,6 +1,4 @@
 class SearchError(Exception):
-    """Base class for every failure the engine reports to a caller."""
-
     status_code = 400
 
 
@@ -29,8 +27,6 @@ class PlanningError(SearchError):
 
 
 class ProviderError(SearchError):
-    """Provider outage error."""
-
     status_code = 503
 
 

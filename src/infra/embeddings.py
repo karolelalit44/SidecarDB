@@ -6,10 +6,11 @@ from pathlib import Path
 
 import httpx
 
-from core.config import Settings
-from core.constants import AUTHORIZATION_HEADER, BEARER_PREFIX, PROVIDER_API, PROVIDER_LOCAL
+from core.config import PROVIDER_API, PROVIDER_LOCAL, PROVIDER_NONE, Settings
+from core.constants import EMBEDDING_BATCH_SIZE, LLM_TIMEOUT_SECONDS
 from core.exceptions import ConfigurationError, EmbeddingError
-from core.logging_config import get_logger
+from core.wire import AUTHORIZATION_HEADER, BEARER_PREFIX
+from utils.logging_config import get_logger
 
 logger = get_logger("embeddings")
 _backend_lock = threading.Lock()
@@ -21,7 +22,6 @@ PRELOAD_COMMAND = (
 
 
 def _normalise(vector: list[float]) -> list[float]:
-    """Scale to a unit vector; retrieval scores are dot products of unit vectors."""
     magnitude = math.sqrt(sum(value * value for value in vector))
     if not magnitude:
         return list(vector)
@@ -29,14 +29,12 @@ def _normalise(vector: list[float]) -> list[float]:
 
 
 class _ApiBackend:
-    """Embeds through an OpenAI-compatible /embeddings endpoint over HTTP."""
-
     def __init__(self, settings: Settings) -> None:
         base = (settings.embedding_api_base_url or settings.llm_base_url).rstrip("/")
         self._url = f"{base}/embeddings"
         self._key = settings.embedding_api_key or settings.llm_api_key
         self._model = settings.embedding_model
-        self._client = httpx.AsyncClient(timeout=settings.llm_timeout_seconds)
+        self._client = httpx.AsyncClient(timeout=LLM_TIMEOUT_SECONDS)
 
     async def aencode(self, texts: list[str]) -> list[list[float]]:
         try:
@@ -61,15 +59,13 @@ class _ApiBackend:
 
 
 class _LocalBackend:
-    """Runs a sentence-transformers model in-process (askdb[embeddings])."""
-
     def __init__(self, settings: Settings) -> None:
         try:
             from sentence_transformers import SentenceTransformer
-        except ImportError as exc:  # pragma: no cover - depends on install extra
+        except ImportError as exc:
             raise EmbeddingError(
                 "The local embedding backend needs the embeddings extra: "
-                "pip install 'askdb[embeddings]'"
+                "pip install 'sidecardb[embeddings]'"
             ) from exc
 
         source, is_local = resolve_model_source(settings)
@@ -82,7 +78,6 @@ class _LocalBackend:
                 settings.embedding_model,
                 PRELOAD_COMMAND.format(model=settings.embedding_model),
             )
-        self._settings = settings
         self.model = SentenceTransformer(source, device=settings.embedding_device)
 
     def encode(self, texts: list[str]) -> list[list[float]]:
@@ -90,7 +85,7 @@ class _LocalBackend:
             list(map(float, vector))
             for vector in self.model.encode(
                 texts,
-                batch_size=self._settings.embedding_batch_size,
+                batch_size=EMBEDDING_BATCH_SIZE,
                 normalize_embeddings=True,
             )
         ]
@@ -100,7 +95,6 @@ class _LocalBackend:
 
 
 def resolve_model_source(settings: Settings) -> tuple[str, bool]:
-    """Prefer a local copy of the model, else the hub id. Returns (source, is_local)."""
     local = settings.embedding_local_path.strip()
     if local and Path(local).is_dir():
         return local, True
@@ -115,8 +109,6 @@ def resolve_model_source(settings: Settings) -> tuple[str, bool]:
 
 
 class Embedder:
-    """Turns text into vectors, via the configured provider."""
-
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._backend: _ApiBackend | _LocalBackend | None = None
@@ -124,7 +116,7 @@ class Embedder:
 
     @property
     def enabled(self) -> bool:
-        return self._settings.embedding_provider != "none"
+        return self._settings.embedding_provider != PROVIDER_NONE
 
     def _load(self):
         if self._backend is None:
@@ -139,7 +131,7 @@ class Embedder:
                     else:
                         raise ConfigurationError(
                             f"Unknown embedding provider {provider!r}; "
-                            "use 'api', 'local' or 'none'."
+                            f"use {PROVIDER_API!r}, {PROVIDER_LOCAL!r} or {PROVIDER_NONE!r}."
                         )
                     logger.debug(
                         "embeddings: %s backend ready in %d ms, width %d",

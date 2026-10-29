@@ -1,5 +1,5 @@
-from core.logging_config import get_logger
-from core.types import QueryIntent
+from core.plan import QueryIntent
+from utils.logging_config import get_logger
 
 logger = get_logger("answer")
 
@@ -7,8 +7,6 @@ SCALAR_INTENTS = (QueryIntent.count, QueryIntent.aggregate)
 
 
 class _FormatDict(dict):
-    """Record placeholders that could not be bound."""
-
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.missing: list[str] = []
@@ -25,7 +23,6 @@ def render_template(
     *,
     max_chars: int,
 ) -> str:
-    """Bind a template to query records, or return empty string on failure."""
     if not template or not template.strip():
         return ""
 
@@ -36,13 +33,9 @@ def render_template(
         value = next(iter(records[0].values()))
         context["row_count"] = value
         context["count"] = value
-        context["value"] = value
-        context["result"] = value
-        context["total"] = value
     else:
         context["row_count"] = len(records)
         context["count"] = len(records)
-        context["total"] = len(records)
 
     if records:
         for key, value in records[0].items():

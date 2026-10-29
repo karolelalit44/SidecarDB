@@ -1,12 +1,21 @@
 import json
 import logging
 import sys
-from typing import TYPE_CHECKING
 
-from core.constants import COLOURS, DIM, NAMESPACE, RESET
+from core.constants import LOG_COLOR, LOG_DEPENDENCY_LEVEL, LOG_FORMAT, LOG_LEVEL
 
-if TYPE_CHECKING:
-    from core.config import Settings
+NAMESPACE = "sidecardb"
+
+RESET = "\033[0m"
+DIM = "\033[2m"
+
+COLOURS = {
+    "DEBUG": "\033[36m",
+    "INFO": "\033[32m",
+    "WARNING": "\033[33m",
+    "ERROR": "\033[31m",
+    "CRITICAL": "\033[1;31m",
+}
 
 
 class ColouredFormatter(logging.Formatter):
@@ -22,8 +31,6 @@ class ColouredFormatter(logging.Formatter):
 
 
 class JsonFormatter(logging.Formatter):
-    """One JSON object per line, for log aggregation."""
-
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, object] = {
             "timestamp": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
@@ -40,8 +47,6 @@ class JsonFormatter(logging.Formatter):
 
 
 class NamespaceFilter(logging.Filter):
-    """Applies one level to askdb records and another to everything else."""
-
     def __init__(self, namespace: str, app_level: int, dependency_level: int) -> None:
         super().__init__()
         self._namespace = namespace
@@ -58,39 +63,32 @@ class NamespaceFilter(logging.Filter):
 
 
 def get_logger(name: str) -> logging.Logger:
-    """A logger under the askdb namespace; safe to call at import time."""
     return logging.getLogger(f"{NAMESPACE}.{name}")
 
 
-def _wants_colour(settings: "Settings") -> bool:
-    if settings.log_color == "on":
+def _wants_colour() -> bool:
+    if LOG_COLOR == "on":
         return True
-    if settings.log_color == "off":
+    if LOG_COLOR == "off":
         return False
     return bool(sys.stdout.isatty())
 
 
-def _formatter(settings: "Settings") -> logging.Formatter:
-    if settings.log_format == "json":
+def _formatter() -> logging.Formatter:
+    if LOG_FORMAT == "json":
         return JsonFormatter()
-    if _wants_colour(settings):
+    if _wants_colour():
         return ColouredFormatter()
     return logging.Formatter("%(asctime)s %(levelname)-8s %(name)s %(message)s")
 
 
-def configure_logging(settings: "Settings") -> logging.Logger:
-    """Attach one handler to the askdb logger.
-
-    The root logger is never touched: when askdb runs inside a host
-    application, that application owns its own logging. The CLI and Docker
-    entrypoint call this to get the standalone service's output.
-    """
+def configure_logging() -> logging.Logger:
     namespace = NAMESPACE
-    app_level = getattr(logging, settings.log_level, logging.INFO)
-    dep_level = getattr(logging, settings.log_dependency_level, logging.WARNING)
+    app_level = getattr(logging, LOG_LEVEL, logging.INFO)
+    dep_level = getattr(logging, LOG_DEPENDENCY_LEVEL, logging.WARNING)
 
     handler = logging.StreamHandler(stream=sys.stdout)
-    handler.setFormatter(_formatter(settings))
+    handler.setFormatter(_formatter())
     handler.addFilter(NamespaceFilter(namespace, app_level, dep_level))
 
     logger = logging.getLogger(namespace)

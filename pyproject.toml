@@ -3,13 +3,13 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "askdb"
+name = "sidecardb"
 version = "2.2.0"
 description = "Ask a PostgreSQL database a question in plain English and get the rows back."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
-authors = [{ name = "askdb contributors" }]
+authors = [{ name = "sidecardb contributors" }]
 keywords = ["nl2sql", "postgres", "llm", "search", "rag", "natural-language"]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
@@ -37,25 +37,23 @@ dependencies = [
 # The default "api" provider needs none of this.
 embeddings = ["sentence-transformers>=3.0,<7.0"]
 dev = [
-    "pytest>=8.3.0",
-    "pytest-asyncio>=0.24.0",
     "ruff>=0.6.0",
     "mypy>=1.11.0",
     "build>=1.2.0",
 ]
 
 [project.scripts]
-askdb = "core.cli:main"
+sidecardb = "core.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/karolelalit44/poc-db-nl-search"
 Repository = "https://github.com/karolelalit44/poc-db-nl-search"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/core", "src/infra"]
+packages = ["src/core", "src/infra", "src/utils"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src", "tests", "README.md", "LICENSE", "pyproject.toml"]
+include = ["src", "README.md", "LICENSE", "pyproject.toml"]
 exclude = ["local"]
 
 [tool.ruff]
@@ -66,7 +64,6 @@ target-version = "py312"
 select = ["F", "E", "W", "I", "N", "UP", "B", "C4", "SIM", "RUF", "DTZ", "T20", "ASYNC", "LOG", "G", "PIE", "RET", "PERF"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101"]
 "src/core/cli.py" = ["T20"]
 
 [tool.ruff.format]
@@ -76,7 +73,7 @@ indent-style = "space"
 [tool.mypy]
 python_version = "3.12"
 mypy_path = "src"
-packages = ["core", "infra"]
+packages = ["core", "infra", "utils"]
 check_untyped_defs = true
 no_implicit_optional = true
 warn_redundant_casts = true
@@ -86,8 +83,3 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = ["infra.llm", "infra.db", "infra.embeddings"]
 disallow_untyped_defs = false
-
-[tool.pytest.ini_options]
-asyncio_mode = "auto"
-testpaths = ["tests"]
-pythonpath = ["src"]

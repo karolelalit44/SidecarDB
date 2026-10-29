@@ -1,37 +1,88 @@
+from typing import TYPE_CHECKING
+
 import sqlglot
 from sqlglot import exp
 
-from core.config import Settings
-from core.constants import (
-    ANONYMOUS,
-    BLOCKED_NODES,
-    DIALECT,
-    FORBIDDEN_FUNCTIONS,
-    IDENTIFIER_EXTRA_CHARACTERS,
-    PG_IDENTIFIER_MAX_LENGTH,
-    ROOT_TYPE,
-)
+from core.constants import DEFAULT_LIMIT, MAX_LIMIT
 from core.exceptions import SecurityError
-from core.logging_config import get_logger
-from core.types import SchemaGraph
+from core.plan import (
+    COUNT_ALIAS,
+    NULL_TESTS,
+    OPERATORS,
+    PATTERN_OPERATORS,
+    WILDCARD,
+    MeasureFunction,
+    QueryIntent,
+    Statement,
+)
+from utils.logging_config import get_logger
+from utils.sql import is_safe_identifier, quote_identifier
+
+if TYPE_CHECKING:
+    from core.catalog import SchemaGraph
+    from core.plan import QueryPlan
 
 logger = get_logger("guard")
 
 
-def is_safe_identifier(name: str) -> bool:
-    if not name or len(name) > PG_IDENTIFIER_MAX_LENGTH:
-        return False
-    if not (name[0].isalpha() or name[0] == "_"):
-        return False
-    return all(
-        character.isalnum() or character in IDENTIFIER_EXTRA_CHARACTERS for character in name
-    )
+ANONYMOUS = "anonymous"
+DIALECT = "postgres"
+ROOT_TYPE = exp.Select
+
+FORBIDDEN_FUNCTIONS = frozenset(
+    {
+        "pg_sleep",
+        "pg_read_file",
+        "pg_read_binary_file",
+        "pg_ls_dir",
+        "pg_stat_file",
+        "pg_file_read",
+        "pg_logdir_ls",
+        "dblink",
+        "dblink_exec",
+        "dblink_connect",
+        "query_to_xml",
+        "query_to_xml_and_xmlschema",
+        "cursor_to_xml",
+        "pg_terminate_backend",
+        "pg_cancel_backend",
+        "pg_reload_conf",
+        "lo_import",
+        "lo_export",
+        "set_config",
+        "pg_advisory_lock",
+        "pg_advisory_lock_shared",
+        "current_setting",
+    }
+)
+
+BLOCKED_NODES = (
+    exp.Insert,
+    exp.Update,
+    exp.Delete,
+    exp.Drop,
+    exp.Alter,
+    exp.Create,
+    exp.TruncateTable,
+    exp.Command,
+    exp.Grant,
+    exp.Revoke,
+    exp.Transaction,
+    exp.Commit,
+    exp.Rollback,
+    exp.Set,
+    exp.Use,
+    exp.Merge,
+    exp.Copy,
+    exp.Pragma,
+    exp.Into,
+)
 
 
 def quote(name: str) -> str:
     if not is_safe_identifier(name):
         raise ValueError("Unsafe identifier")
-    return f'"{name}"'
+    return quote_identifier(name)
 
 
 def _function_names(node) -> set[str]:
@@ -45,24 +96,104 @@ def _function_names(node) -> set[str]:
 
 
 def _is_aggregate(tree: exp.Expression) -> bool:
-    """Check if expression contains GROUP BY or aggregate functions."""
     return tree.find(exp.Group) is not None or any(True for _ in tree.find_all(exp.AggFunc))
 
 
 def _rewrites_meaning(tree: exp.Expression, statement: str) -> bool:
-    """Return True if sqlglot rewrite alters semantic meaning of the SQL."""
     produced = any(True for _ in tree.find_all(exp.NullSafeEQ))
     if not produced:
         return False
     return "IS NOT DISTINCT FROM" not in statement.upper()
 
 
-def validate(sql: str, graph: SchemaGraph | None, settings: Settings) -> str:
-    """Accept only a SELECT against catalog tables in the configured schema.
+def like_pattern(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
 
-    The returned statement is safe to hand to the sandbox: read-only shape,
-    known tables, no forbidden functions, and a LIMIT that bounds the result.
-    """
+
+def statement_for(plan: "QueryPlan", graph: "SchemaGraph", schema: str) -> Statement:
+    sql, params = _compose(plan, graph)
+    validated = validate(sql, graph, schema)
+    return Statement(sql=validated.sql, params=params)
+
+
+def _compose(plan: "QueryPlan", graph: "SchemaGraph") -> tuple[str, tuple[str, ...]]:
+    binder = _Binder()
+    group = f" GROUP BY {', '.join(quote(c) for c in plan.group_by)}" if plan.group_by else ""
+    order = ""
+    if plan.order_by and plan.intent is not QueryIntent.count:
+        direction = "DESC" if plan.descending else "ASC"
+        order = f" ORDER BY {quote(plan.order_by)} {direction}"
+    sql = f"SELECT {_projection(plan, graph)} FROM {quote(plan.table)}"
+    sql += _where(plan, binder) + group + order
+    return sql, tuple(binder.params)
+
+
+def _projection(plan: "QueryPlan", graph: "SchemaGraph") -> str:
+    if plan.intent is QueryIntent.count:
+        return f"COUNT(*) AS {COUNT_ALIAS}"
+
+    if plan.intent is QueryIntent.aggregate:
+        assert plan.measure_function is not None
+        measure_sql = f"COUNT(*) AS {COUNT_ALIAS}"
+        if plan.measure_function is not MeasureFunction.count:
+            assert plan.measure_column is not None
+            alias = f"{plan.measure_function.value}_of_{plan.measure_column}"
+            function = plan.measure_function.value.upper()
+            measure_sql = f"{function}({quote(plan.measure_column)}) AS {quote(alias)}"
+        if plan.group_by:
+            group_cols = ", ".join(quote(column) for column in plan.group_by)
+            return f"{group_cols}, {measure_sql}"
+        return measure_sql
+
+    if plan.projection:
+        prefix = "DISTINCT " if plan.intent is QueryIntent.distinct else ""
+        return prefix + ", ".join(quote(column) for column in plan.projection)
+
+    table = graph.tables.get(plan.table)
+    if table is None or not table.columns:
+        return WILDCARD
+    return ", ".join(quote(column.name) for column in table.columns)
+
+
+def _where(plan: "QueryPlan", binder: "_Binder") -> str:
+    clauses: list[str] = []
+
+    if plan.filter_column:
+        if plan.filter_operator is None:
+            raise SecurityError("A filter column requires a filter operator.")
+        operator = plan.filter_operator.upper()
+        if operator not in OPERATORS:
+            raise SecurityError("Unsupported filter operator.")
+        column = quote(plan.filter_column)
+        if operator in NULL_TESTS:
+            clauses.append(f"{column} {operator}")
+        elif plan.filter_value is None:
+            raise SecurityError(f"Operator {operator} requires a comparison value.")
+        elif operator in PATTERN_OPERATORS:
+            clauses.append(f"{column} {operator} {binder.bind(like_pattern(plan.filter_value))}")
+        else:
+            clauses.append(f"{column} {operator} {binder.bind(plan.filter_value)}")
+
+    if plan.text_search_query and plan.text_search_columns:
+        pattern = binder.bind(like_pattern(plan.text_search_query))
+        parts = [f"{quote(column)} ILIKE {pattern}" for column in plan.text_search_columns]
+        clauses.append("(" + " OR ".join(parts) + ")")
+
+    if not clauses:
+        return ""
+    return " WHERE " + " AND ".join(clauses)
+
+
+class _Binder:
+    def __init__(self) -> None:
+        self.params: list[str] = []
+
+    def bind(self, value: str) -> str:
+        self.params.append(value)
+        return f"${len(self.params)}"
+
+
+def validate(sql: str, graph: "SchemaGraph | None", schema: str) -> Statement:
     statement = (sql or "").strip()
     if not statement:
         raise SecurityError("Empty statement.")
@@ -95,17 +226,13 @@ def validate(sql: str, graph: SchemaGraph | None, settings: Settings) -> str:
     if graph and graph.tables:
         known = {name.lower() for name in graph.tables}
         local = {c.alias_or_name.lower() for c in tree.find_all(exp.CTE) if c.alias_or_name}
-        schema = settings.db_schema.lower()
+        schema_name = schema.lower()
         logger.debug("guard: checking every table reference against %d catalog tables", len(known))
         for table in tree.find_all(exp.Table):
-            # An unqualified name is resolved through search_path, which the
-            # sandbox pins to the configured schema. A schema qualifier is
-            # allowed only when it names the configured schema; a database
-            # qualifier names something outside it entirely and is refused.
             if table.catalog:
                 logger.debug("guard: rejected; %s names another database", table.sql())
                 raise SecurityError("Statement references a table outside the configured schema.")
-            if table.db and table.db.lower() != schema:
+            if table.db and table.db.lower() != schema_name:
                 logger.debug("guard: rejected; %s names a schema outside the catalog", table.sql())
                 raise SecurityError("Statement references a table outside the configured schema.")
             name = table.name.lower()
@@ -117,30 +244,33 @@ def validate(sql: str, graph: SchemaGraph | None, settings: Settings) -> str:
     rewritten = False
     if limit is None:
         if not _is_aggregate(tree):
-            tree = tree.limit(settings.default_limit)
+            tree = tree.limit(DEFAULT_LIMIT)
             rewritten = True
-            logger.debug("guard: the statement carried no limit; adding %d", settings.default_limit)
+            logger.debug("guard: the statement carried no limit; adding %d", DEFAULT_LIMIT)
     elif isinstance(limit.expression, exp.Literal) and limit.expression.is_int:
         try:
             value = int(limit.expression.this)
         except (TypeError, ValueError):
-            value = settings.default_limit
-        if value > settings.max_limit:
-            limit.expression.set("this", str(settings.max_limit))
+            value = DEFAULT_LIMIT
+        if value > MAX_LIMIT:
+            limit.expression.set("this", str(MAX_LIMIT))
             rewritten = True
             logger.debug(
                 "guard: the statement asked for %d rows; clamping to %d",
                 value,
-                settings.max_limit,
+                MAX_LIMIT,
             )
 
     if not rewritten:
         logger.debug("guard: statement accepted unchanged")
-        return statement
+        return Statement(statement)
 
     if _rewrites_meaning(tree, statement):
         logger.debug("guard: rejected; the rewrite would change the meaning of the statement")
         raise SecurityError("Statement uses an operator this validator cannot render faithfully.")
 
     logger.debug("guard: statement accepted; a limit was added or clamped")
-    return tree.sql(dialect=DIALECT)
+    return Statement(tree.sql(dialect=DIALECT))
+
+
+__all__ = ["is_safe_identifier", "like_pattern", "quote", "statement_for", "validate"]
