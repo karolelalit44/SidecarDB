@@ -56,7 +56,7 @@ def serve(host: str | None, port: int | None, env_file: str | None) -> None:
     from core.client import SidecarDB
     from core.server import create_app
 
-    sidecardb = SidecarDB(_env_file=env_file) if env_file else SidecarDB()
+    sidecardb = SidecarDB(_env_file=env_file)
     app = create_app(sidecardb)
     uvicorn.run(
         app,

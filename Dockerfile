@@ -6,8 +6,8 @@ WORKDIR /build
 COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
 
-RUN pip install --no-cache-dir --upgrade pip hatchling \
-    && pip install --no-cache-dir --no-build-isolation --prefix /install packaging .
+RUN pip install --default-timeout=120 --retries 5 --no-cache-dir hatchling \
+    && pip install --default-timeout=120 --retries 5 --no-cache-dir --no-build-isolation --prefix /install packaging pyyaml .
 
 FROM python:3.12-slim
 

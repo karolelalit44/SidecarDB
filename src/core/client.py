@@ -9,7 +9,7 @@ from unicodedata import category
 from core.answer import bind_template
 from core.capabilities import Catalog, Embedder, Planner, Runner
 from core.catalog import SchemaGraph
-from core.config import Settings
+from core.config import Settings, get_settings
 from core.constants import (
     ALLOWED_CONTROL,
     APP_NAME,
@@ -78,9 +78,14 @@ class SidecarDB:
         catalog: Catalog | None = None,
         **overrides: Any,
     ) -> None:
+        env_file = overrides.pop("_env_file", None)
         if settings is not None and overrides:
             raise ValueError("Pass either a Settings instance or keyword overrides, not both.")
-        self.settings = settings if settings is not None else Settings(**overrides)
+        self.settings = (
+            settings
+            if settings is not None
+            else get_settings(_env_file=env_file, **overrides)
+        )
         self.version = _detect_version()
 
         self._owns_planner = planner is None

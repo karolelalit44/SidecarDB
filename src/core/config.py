@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from core.constants import (
     DEFAULT_SCHEMA,
-    PROVIDER_API,
+    PROVIDER_NONE,
 )
 
 CsvList = Annotated[list[str], NoDecode]
@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     llm_model: str = ""
     llm_extra_body: dict[str, Any] = {}
 
-    embedding_provider: Literal["api", "local", "none"] = PROVIDER_API
+    embedding_provider: Literal["api", "local", "none"] = PROVIDER_NONE
     embedding_model: str = ""
     embedding_api_base_url: str = ""
     embedding_api_key: str = ""
@@ -62,5 +62,7 @@ class Settings(BaseSettings):
         return value
 
 
-def get_settings(**overrides: Any) -> Settings:
+def get_settings(_env_file: str | None = None, **overrides: Any) -> Settings:
+    if _env_file:
+        return Settings(_env_file=_env_file, **overrides)
     return Settings(**overrides)
