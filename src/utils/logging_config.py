@@ -72,29 +72,46 @@ def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(f"{NAMESPACE}.{name}")
 
 
-def _wants_colour() -> bool:
-    if LOG_COLOR == "on":
+def _wants_colour(color: str | None = None) -> bool:
+    mode = color or LOG_COLOR
+    if mode == "on":
         return True
-    if LOG_COLOR == "off":
+    if mode == "off":
         return False
     return bool(sys.stdout.isatty())
 
 
-def _formatter() -> logging.Formatter:
-    if LOG_FORMAT == "json":
+def _formatter(format_type: str | None = None, color: str | None = None) -> logging.Formatter:
+    fmt = format_type or LOG_FORMAT
+    if fmt == "json":
         return JsonFormatter()
-    if _wants_colour():
+    if _wants_colour(color):
         return ColouredFormatter()
     return logging.Formatter("%(asctime)s %(levelname)-8s %(name)s %(message)s")
 
 
-def configure_logging() -> logging.Logger:
+def configure_logging(
+    level: str | None = None,
+    dependency_level: str | None = None,
+    format_type: str | None = None,
+    color: str | None = None,
+) -> logging.Logger:
     namespace = NAMESPACE
-    app_level = getattr(logging, LOG_LEVEL, logging.INFO)
-    dep_level = getattr(logging, LOG_DEPENDENCY_LEVEL, logging.WARNING)
+    chosen_level = level or LOG_LEVEL
+    chosen_dep = dependency_level or LOG_DEPENDENCY_LEVEL
+    app_level = getattr(
+        logging,
+        chosen_level.upper() if isinstance(chosen_level, str) else chosen_level,
+        logging.DEBUG,
+    )
+    dep_level = getattr(
+        logging,
+        chosen_dep.upper() if isinstance(chosen_dep, str) else chosen_dep,
+        logging.WARNING,
+    )
 
     handler = logging.StreamHandler(stream=sys.stdout)
-    handler.setFormatter(_formatter())
+    handler.setFormatter(_formatter(format_type=format_type, color=color))
     handler.addFilter(NamespaceFilter(namespace, app_level, dep_level))
 
     logger = logging.getLogger(namespace)
@@ -102,4 +119,14 @@ def configure_logging() -> logging.Logger:
     logger.addHandler(handler)
     logger.setLevel(min(app_level, dep_level))
     logger.propagate = False
+    logger.debug(
+        "logging configured: namespace=%s app_level=%s dep_level=%s format=%s",
+        namespace,
+        logging.getLevelName(app_level),
+        logging.getLevelName(dep_level),
+        format_type or LOG_FORMAT,
+    )
     return logger
+
+
+configure_logging()

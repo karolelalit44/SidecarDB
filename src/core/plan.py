@@ -43,9 +43,23 @@ class MeasureFunction(StrEnum):
         return self is not MeasureFunction.count
 
 
+class JoinType(StrEnum):
+    inner = "inner"
+    left = "left"
+
+
+class JoinSpec(BaseModel):
+    table: str
+    on_column: str
+    target_table: str
+    target_column: str
+    join_type: JoinType = JoinType.inner
+
+
 class Plan(BaseModel):
     intent: QueryIntent
     table: str
+    joins: list[JoinSpec] = Field(default_factory=list)
     measure_column: str | None = None
     measure_function: MeasureFunction | None = None
     filter_column: str | None = None
@@ -58,6 +72,13 @@ class Plan(BaseModel):
     text_search_columns: list[str] = Field(default_factory=list)
     text_search_query: str | None = None
     template: str | None = Field(default=None, max_length=200)
+
+    @field_validator("joins", mode="before")
+    @classmethod
+    def _coerce_joins(cls, value: object) -> object:
+        if value is None:
+            return []
+        return value
 
     @field_validator("projection", "group_by", "text_search_columns", mode="before")
     @classmethod
@@ -111,6 +132,8 @@ class Outcome:
 
 
 __all__ = [
+    "JoinSpec",
+    "JoinType",
     "MeasureFunction",
     "Outcome",
     "Plan",

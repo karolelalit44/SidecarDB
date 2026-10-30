@@ -1,163 +1,199 @@
+<div align="center">
+
 # sidecarDB
 
-**Ask a PostgreSQL database a question in plain English and get the rows back — safely.**
+**Natural-language search for PostgreSQL.**
 
-`sidecarDB` is a plug-and-play natural-language search engine for PostgreSQL. It introspects your
-schema at runtime, lets a language model *plan* the search as a constrained JSON object (never
-raw SQL), validates that plan against an AST guard and your live catalog, executes it inside a
-read-only sandbox with bound parameters, and returns the rows with a plain-English answer.
+Ask a question in plain English. Get a written answer and the exact rows behind it —
+without the model ever writing SQL.
 
-It ships as both a **library** you embed and an **HTTP service** you deploy. The whole
-configuration is two values.
+[![PyPI](https://img.shields.io/pypi/v/sidecardb?color=2563eb)](https://pypi.org/project/sidecardb/)
+[![Python](https://img.shields.io/pypi/pyversions/sidecardb)](https://pypi.org/project/sidecardb/)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-ready-336791?logo=postgresql&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-16a34a)
 
+[Quickstart](#quickstart) · [Library](#use-as-a-library) · [Service](#run-as-a-service) · [How it works](#how-it-works)
+
+</div>
+
+---
+
+```text
+$ curl -s localhost:8000/api/v1/search \
+    -d '{"question": "Which region had the highest revenue last quarter?"}'
+
+{
+  "answer": "EMEA led last quarter with $4.2M in revenue.",
+  "records": [{ "region": "EMEA", "revenue": 4200000 }],
+  "retrieved_tables": ["sales"],
+  "elapsed_ms": 142.5
+}
 ```
-question → schema retrieval → LLM planner (JSON plan) → AST guard → sandboxed execution → answer
-```
 
-## Install
+sidecarDB sits beside your database: no schema changes, no migrations, no data copies.
+It introspects the schema, lets the model plan the search, validates the plan, and executes
+it in a read-only sandbox.
+
+## Quickstart
+
+**1 — Install** · Python 3.12+ and PostgreSQL
 
 ```bash
 pip install sidecardb
-# optional: local embedding models (pulls torch, several GB)
-pip install 'sidecardb[embeddings]'
 ```
 
-## Use it as a library
+**2 — Configure** · a `.env` file or exported variables
+
+```dotenv
+DATABASE_URL=postgresql://nl_reader:secret@localhost:5432/sales
+LLM_BASE_URL=https://api.openai.com/v1   # any OpenAI-compatible endpoint
+LLM_MODEL=gpt-4.1-mini
+LLM_API_KEY=sk-...
+```
+
+**3 — Ask**
+
+```python
+import asyncio
+from core import SidecarDB
+
+async def main():
+    async with SidecarDB() as db:
+        result = await db.search("which region had the highest revenue last quarter?")
+        print(result.answer)    # plain English
+        print(result.records)   # the rows
+
+asyncio.run(main())
+```
+
+That's the whole setup. The schema is mapped automatically at startup.
+
+## Why sidecarDB
+
+| | |
+| --- | --- |
+| **No SQL from the model** | The LLM returns a constrained JSON plan. sidecarDB compiles and validates it — raw SQL never reaches your database. |
+| **Schema-aware** | Tables, columns, types, comments and row estimates are read live from `pg_catalog`, then embedded for retrieval. |
+| **Answers plus data** | Every call returns a human-readable sentence *and* the exact rows behind it. |
+| **Library or service** | Embed it in Python in five lines, or expose it as an HTTP API or container. |
+| **Read-only by construction** | SELECT-only AST guard, bound parameters, and a sandboxed read-only session. |
+
+## Use as a library
 
 ```python
 from core import SidecarDB
 
 async with SidecarDB(
-    database_url="postgresql://reader@localhost:5432/sales",
+    database_url="postgresql://nl_reader:secret@localhost:5432/sales",
+    llm_base_url="https://api.openai.com/v1",
+    llm_model="gpt-4.1-mini",
     llm_api_key="sk-...",
 ) as db:
-    answer = await db.search("which region had the highest revenue last quarter?")
-    print(answer.answer)      # plain English
-    print(answer.records)     # the rows
+    result = await db.search("how many orders were refunded this month?")
+    print(result.answer)
+    for row in result.records:
+        print(row)
 ```
 
-Two required values; every other knob is fixed inside the package (`core/constants.py`), so
-behaviour cannot drift between different databases or model providers. The environment exists only
-for deployment-specific values: the database settings, the model provider settings, and secrets. You
-can pass them as keywords or environment variables — the instance starts from the environment and an
-optional `.env` file, exactly like pydantic-settings.
+Prefer environment variables? Call `SidecarDB()` and it reads `.env` automatically.
+Need the mapped schema? `await db.catalog()`.
 
-## Run it as a service
+## Run as a service
 
 ```bash
-export DATABASE_URL=postgresql://reader@localhost:5432/sales
-export LLM_API_KEY=sk-...
 sidecardb serve --port 8000
-# or: uvicorn 'core.server:create_app' --factory
 ```
 
-| Method | Path                       | Purpose                                   |
-| ------ | -------------------------- | ----------------------------------------- |
-| GET    | `/health`                  | Liveness: pings the database, reports degraded as `503` |
-| GET    | `/api/v1/schema`           | The mapped catalog (`?refresh=true` re-introspects) |
-| POST   | `/api/v1/search`           | `{"question": "..."}` → answer + rows     |
-| GET    | `/docs`                    | OpenAPI UI                                |
-
-Configuration is supplied via environment variables (see `../usage/.env.example`). Behaviour constants live in
-[`src/core/constants.py`](src/core/constants.py).
-
-## Docker
-
-Build and run the standalone service container:
+Or with Docker:
 
 ```bash
 docker build -t sidecardb .
-docker run -p 8000:8000 --env-file ../usage/.env sidecardb
+docker run -p 8000:8000 --env-file .env sidecardb
 ```
 
-For a complete demo stack with sample PostgreSQL and client scripts, see [`../usage`](../usage).
+### HTTP API
 
-## Provisioning the read-only role
-
-On an existing database, provision the same sandboxed role yourself:
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/v1/search` | `{"question": "..."}` → answer + rows |
+| `GET` | `/api/v1/schema` | Live catalog (`?refresh=true` to re-introspect) |
+| `GET` | `/health` | Liveness + database status |
+| `GET` | `/docs` | Interactive OpenAPI UI |
 
 ```bash
-sidecardb setup-roles \
-  --admin-dsn postgresql://postgres:pw@localhost:5435/sidecardb_demo \
-  --role nl_search_user --schema public
+curl -X POST http://localhost:8000/api/v1/search \
+  -H "Content-Type: application/json" \
+  -d '{"question": "How many cases are under investigation?"}'
 ```
 
-The password comes from `--password` or the `DB_PASSWORD` environment variable. The identical
-provisioning also ships as [`src/ops/setup_roles.sh`](src/ops/setup_roles.sh),
-which the compose stack mounts into the PostgreSQL container's first-boot init directory.
-
-## Security model
-
-Untrusted questions never become SQL. Six independent layers stand between a question and your
-data:
-
-1. **Input validation** rejects comment markers, statement separators, and control characters.
-2. **The LLM plans, it does not execute.** It returns a JSON `Plan` (table, intent,
-   filter, projection…), never SQL. The plan is checked against the *live catalog*; unknown
-   tables and columns are rejected and fed back for repair.
-3. **AST guard** (sqlglot): only `SELECT` is accepted; mutations, DDL, `COPY … TO PROGRAM`,
-   `DO $$`, transactions, and any function call outside the plan vocabulary
-   (`COUNT`, `SUM`, `AVG`, `MIN`, `MAX`) are refused. Table references must live in the
-   configured schema — any database-level qualifier is rejected, and a schema qualifier is only
-   accepted when it names the configured schema. A `LIMIT` is always enforced.
-4. **Bound parameters**: filter and search values travel as `$1` placeholders, never
-   interpolated into SQL text.
-5. **Sandboxed execution**: read-only session + read-only transaction + `statement_timeout` +
-   `idle_in_transaction_session_timeout` + row cap.
-6. **Database role**: run as a role with `SELECT` only and
-   `default_transaction_read_only = on` — provision it with `sidecardb setup-roles`
-   (see `src/ops/setup_roles.sh`).
-
-Operational hardening: optional API-key auth (`API_KEYS`), per-client rate limiting, request
-body caps (of both declared and streamed bodies), request-id sanitisation, catalog names
-redacted from errors, and generated SQL withheld from responses (the disclosure switches are
-package constants, not environment options). Optional CORS gating is likewise tuned only by
-package constants (`CORS_ALLOW_ORIGINS` and friends; it is off by default).
-
-> Use a dedicated read-only database role. The sandbox is defense in depth, not a substitute
-> for database-level privileges.
-
-## Production checklist
-
-- Set `API_KEYS` to one or more secrets (`python -c "import secrets; print(secrets.token_urlsafe(32))"`).
-- Connect through a **read-only role**; grant `SELECT` only (`sidecardb setup-roles`).
-- Set `DB_SSL=require` (or stronger) for any remote database.
-- SQL disclosure and catalog redaction are package constants (`EXPOSE_SQL = False`,
-  `REDACT_CATALOG_IN_ERRORS = True`); change them in code only for fully trusted callers.
-- Terminate TLS and enforce global rate limits at your edge; the built-in limiter is
-  per-process.
-- Point `LLM_BASE_URL`/`LLM_MODEL` at a provider you trust; questions and schema summaries are
-  sent to it over the built-in transport (a LangChain OpenAI chat client).
-- Run the container as the built-in non-root user (default) and keep `docker compose` passwords
-  out of version control.
+```json
+{
+  "answer": "Found 4 case(s) currently under investigation.",
+  "row_count": 1,
+  "records": [{ "record_count": 4 }],
+  "retrieved_tables": ["cases"],
+  "retrieval_mode": "embedding",
+  "elapsed_ms": 142.5
+}
+```
 
 ## How it works
 
-1. **Introspect** — tables, columns, types, comments and row estimates are read from
-   `pg_catalog` for one schema (`DB_SCHEMA`).
-2. **Retrieve** — table/column texts are embedded (API or local model) and ranked against the
-   question; on low confidence the engine falls back to catalog order and says so in the
-   response (`retrieval_mode`).
-3. **Plan** — one LLM call produces a JSON plan; rejected plans are retried with the rejection
-   reason at a higher sampling temperature.
-4. **Guard & compose** — the accepted plan is composed into a parameterized
-   `SELECT` with a `LIMIT`; the composed statement (and every caller-supplied
-   statement) is re-validated by the AST guard before it can run.
-5. **Execute & answer** — rows run through the sandbox, then a model-written sentence template
-   is bound to the actual values. Execution failures surface as errors (`502`), never as "no
-   records found".
+```mermaid
+flowchart LR
+    A[Question] --> B[Schema retrieval]
+    B --> C["LLM planner<br/>JSON plan, never SQL"]
+    C --> D["AST guard<br/>SELECT only"]
+    D --> E[Read-only sandbox]
+    E --> F[Answer + rows]
+```
+
+1. **Introspect** — map tables, columns, types and comments from `pg_catalog`.
+2. **Retrieve** — rank the most relevant tables for the question, with a catalog fallback.
+3. **Plan** — one LLM call produces a JSON plan; rejected plans are repaired and retried.
+4. **Guard** — compile to parameterized SQL, then validate with `sqlglot` before execution.
+5. **Answer** — run in a read-only sandbox and bind the result to a plain-English sentence.
+
+## Configuration
+
+Only the connection and model are required; everything else has a sane default.
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `DATABASE_URL` | Yes | PostgreSQL connection string |
+| `LLM_BASE_URL` | Yes | Any OpenAI-compatible API base URL |
+| `LLM_MODEL` | Yes | Model name |
+| `LLM_API_KEY` | Yes | Provider key |
+| `DB_SCHEMA` | No | Schema to expose (default: `public`) |
+| `EMBEDDING_PROVIDER` | No | `none` (default), `api`, or `local` |
+| `API_KEYS` | No | Comma-separated keys to protect the HTTP API |
+
+Behavioural settings live in [`src/core/constants.py`](src/core/constants.py), so results stay
+consistent across databases and providers.
+
+## Safe by default
+
+- Questions are **never** turned into SQL. The model plans; sidecarDB compiles.
+- The AST guard allows `SELECT` only, confines access to one schema, and always applies a `LIMIT`.
+- Filters travel as bound parameters and run in a read-only, time-limited session.
+
+For production, connect with a dedicated read-only role:
+
+```bash
+sidecardb setup-roles \
+  --admin-dsn postgresql://postgres:pw@localhost:5432/sales \
+  --role nl_reader --schema public
+```
 
 ## Development
 
 ```bash
-python -m venv .venv && .venv\Scripts\activate    # or source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -e '.[dev]'
 ruff check src && ruff format src
 mypy
+pytest
 ```
-
-`docker compose up` provisions a demo PostgreSQL: on first boot it runs `artifacts/init_schema.sql`
-against the configured schema.
 
 ## License
 

@@ -4,7 +4,14 @@ from pydantic import field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from core.constants import (
+    DEFAULT_CACHE_DIR,
     DEFAULT_SCHEMA,
+    LOG_COLOR,
+    LOG_DEPENDENCY_LEVEL,
+    LOG_FORMAT,
+    LOG_LEVEL,
+    LOG_LLM_PAYLOADS,
+    LOG_SQL,
     PROVIDER_NONE,
 )
 
@@ -21,6 +28,7 @@ class Settings(BaseSettings):
 
     database_url: str = ""
     db_schema: str = DEFAULT_SCHEMA
+    cache_dir: str = DEFAULT_CACHE_DIR
     db_ssl: str = ""
     db_password: str = ""
     db_role: str = ""
@@ -39,6 +47,13 @@ class Settings(BaseSettings):
     embedding_device: str = "cpu"
 
     api_keys: CsvList = []
+
+    log_level: str = LOG_LEVEL
+    log_dependency_level: str = LOG_DEPENDENCY_LEVEL
+    log_sql: bool = LOG_SQL
+    log_llm_payloads: bool = LOG_LLM_PAYLOADS
+    log_format: str = LOG_FORMAT
+    log_color: str = LOG_COLOR
 
     @field_validator("api_keys", mode="before")
     @classmethod
@@ -64,5 +79,5 @@ class Settings(BaseSettings):
 
 def get_settings(_env_file: str | None = None, **overrides: Any) -> Settings:
     if _env_file:
-        return Settings(_env_file=_env_file, **overrides)
+        return Settings(_env_file=_env_file, **overrides)  # type: ignore[call-arg]
     return Settings(**overrides)

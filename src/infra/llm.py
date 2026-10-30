@@ -62,6 +62,7 @@ class LLMClient:
                 extra_body=settings.llm_extra_body or None,
                 **options,
             )
+            logger.debug("llm: ChatOpenAI client initialized")
         return self._model
 
     async def complete_json(
@@ -136,6 +137,9 @@ class LLMClient:
                 logger.debug("Reasoning scratchpad: %s", reasoning)
             raise PlanningError(_empty_response_message(finish_reason, reasoning))
 
+        if LOG_LLM_PAYLOADS:
+            logger.debug("llm payload: raw content received (%d chars): %s", len(content), content)
+
         try:
             payload = extract_json(content)
         except PlanningError as exc:
@@ -154,7 +158,9 @@ class LLMClient:
 
 def extract_json(text: str) -> dict[str, Any]:
     if not text:
+        logger.debug("extract_json: text is empty")
         raise PlanningError("The model returned an empty response.")
+    logger.debug("extract_json: searching for JSON object in %d chars", len(text))
     start = 0
     while True:
         start = text.find("{", start)
@@ -164,12 +170,19 @@ def extract_json(text: str) -> dict[str, Any]:
         if end is not None:
             parsed = _loads(text[start : end + 1])
             if isinstance(parsed, dict):
+                logger.debug(
+                    "extract_json: extracted JSON dict (%d keys: %s)",
+                    len(parsed),
+                    list(parsed.keys()),
+                )
                 return parsed
         start += 1
+    logger.debug("extract_json: failed to find valid JSON object")
     raise PlanningError("The model response contained no JSON object.")
 
 
 def _loads(text: str):
+    logger.debug("_loads: attempting json.loads on %d chars", len(text))
     try:
         return json.loads(text)
     except ValueError:
@@ -197,6 +210,7 @@ def _balanced_end(text: str, start: int) -> int | None:
         elif character == "}":
             depth -= 1
             if depth == 0:
+                logger.debug("_balanced_end: found closing bracket at index %d", index)
                 return index
     return None
 
@@ -207,17 +221,26 @@ def provider_metadata(result: Any) -> dict[str, Any]:
         source = getattr(result, source_name, None)
         if isinstance(source, dict):
             merged.update(source)
+    logger.debug(
+        "provider_metadata: extracted %d metadata keys: %s",
+        len(merged),
+        list(merged.keys()),
+    )
     return merged
 
 
 def _model_content(result: Any) -> str:
     content = getattr(result, "content", None)
-    return content if isinstance(content, str) else ""
+    text = content if isinstance(content, str) else ""
+    logger.debug("_model_content: extracted %d chars", len(text))
+    return text
 
 
 def _reasoning(meta: dict[str, Any]) -> str:
     scratchpad = meta.get(REASONING_FIELD)
-    return scratchpad if isinstance(scratchpad, str) else ""
+    text = scratchpad if isinstance(scratchpad, str) else ""
+    logger.debug("_reasoning: extracted %d chars", len(text))
+    return text
 
 
 def _as_int(value: Any) -> int | None:
@@ -225,6 +248,11 @@ def _as_int(value: Any) -> int | None:
 
 
 def _empty_response_message(finish_reason: Any, reasoning: str) -> str:
+    logger.debug(
+        "_empty_response_message: finish_reason=%s, reasoning_chars=%d",
+        finish_reason,
+        len(reasoning),
+    )
     if reasoning:
         return REASONING_BUDGET_WARNING
     if finish_reason == FINISH_REASON_LENGTH:

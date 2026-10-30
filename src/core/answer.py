@@ -23,6 +23,7 @@ def bind_template(
     max_chars: int,
 ) -> str:
     if not template or not template.strip():
+        logger.debug("template: empty template provided, returning empty string")
         return ""
 
     context: dict[str, object] = {}
@@ -41,12 +42,15 @@ def bind_template(
             context[str(key)] = value
             context[str(key).lower()] = value
 
+    logger.debug(
+        "template: context prepared with %d variables: %s", len(context), list(context.keys())
+    )
     bindings = _FormatDict(context)
     logger.debug("template: binding %r to %d row(s)", template[:max_chars], len(records))
     try:
         filled = template.format_map(bindings).strip()
-    except Exception:
-        logger.warning("Template could not be filled; using the no-answer message.")
+    except Exception as exc:
+        logger.warning("Template could not be filled: %s; using the no-answer message.", exc)
         return ""
 
     if bindings.missing:
@@ -58,6 +62,11 @@ def bind_template(
         return ""
 
     if len(filled) > max_chars:
+        logger.debug(
+            "template: output length %d exceeded max %d chars; truncating",
+            len(filled),
+            max_chars,
+        )
         filled = filled[:max_chars]
     logger.debug("template: bound %d chars: %s", len(filled), filled)
     return filled or ""

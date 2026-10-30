@@ -56,12 +56,22 @@ def serve(host: str | None, port: int | None, env_file: str | None) -> None:
     from core.client import SidecarDB
     from core.server import create_app
 
+    effective_host = host if host is not None else DEFAULT_HOST
+    effective_port = port if port is not None else DEFAULT_PORT
+    logger.debug(
+        "serve command initiated: host=%s port=%s env_file=%s",
+        effective_host,
+        effective_port,
+        env_file,
+    )
+
     sidecardb = SidecarDB(_env_file=env_file)
     app = create_app(sidecardb)
+    logger.debug("launching uvicorn runner on %s:%s", effective_host, effective_port)
     uvicorn.run(
         app,
-        host=host if host is not None else DEFAULT_HOST,
-        port=port if port is not None else DEFAULT_PORT,
+        host=effective_host,
+        port=effective_port,
         log_config=None,
     )
 
@@ -78,12 +88,15 @@ def setup_roles(admin_dsn: str, role: str | None, schema: str, password: str | N
     if not effective_password:
         logger.error("No role password: pass --password or set DB_PASSWORD in settings.")
         raise SystemExit(2)
+    logger.debug("setup_roles command initiated: schema=%s role=%s", schema, effective_role)
     asyncio.run(create_read_only_role(admin_dsn, effective_role, effective_password, schema))
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    logger.debug("CLI main invoked with argv: %s", argv)
     parser = build_parser()
     args = parser.parse_args(argv)
+    logger.debug("CLI parsed command: %s", args.command)
     if args.command == "serve":
         serve(args.host, args.port, args.env_file)
         return 0

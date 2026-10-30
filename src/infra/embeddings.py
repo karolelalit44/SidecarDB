@@ -27,6 +27,7 @@ _backend_lock = threading.Lock()
 def _normalise(vector: list[float]) -> list[float]:
     magnitude = math.sqrt(sum(value * value for value in vector))
     if not magnitude:
+        logger.debug("_normalise: zero magnitude vector, returning unchanged")
         return list(vector)
     return [value / magnitude for value in vector]
 
@@ -42,24 +43,45 @@ class _ApiBackend:
         self._key = settings.embedding_api_key
         self._model = settings.embedding_model
         self._client = httpx.AsyncClient(timeout=LLM_TIMEOUT_SECONDS)
+        logger.debug("embeddings api: backend configured for %s (model=%s)", self._url, self._model)
 
     async def aencode(self, texts: list[str]) -> list[list[float]]:
-        try:
-            response = await self._client.post(
-                self._url,
-                headers={AUTHORIZATION_HEADER: f"{BEARER_PREFIX}{self._key}"},
-                json={"model": self._model, "input": texts},
-            )
-            response.raise_for_status()
-            payload = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise EmbeddingError(f"The embedding endpoint could not be reached: {exc}") from exc
+        if not texts:
+            return []
+        chunk_size = max(EMBEDDING_BATCH_SIZE, 1)
+        all_embeddings: list[list[float]] = []
 
-        items = payload.get("data")
-        if not isinstance(items, list):
-            raise EmbeddingError("The embedding endpoint returned no data array.")
-        items = sorted(items, key=lambda item: item.get("index", 0))
-        return [_normalise([float(value) for value in item["embedding"]]) for item in items]
+        for i in range(0, len(texts), chunk_size):
+            chunk = texts[i : i + chunk_size]
+            logger.debug(
+                "embeddings api: sending POST to %s with %d texts (chunk %d/%d)",
+                self._url,
+                len(chunk),
+                i // chunk_size + 1,
+                (len(texts) + chunk_size - 1) // chunk_size,
+            )
+            try:
+                response = await self._client.post(
+                    self._url,
+                    headers={AUTHORIZATION_HEADER: f"{BEARER_PREFIX}{self._key}"},
+                    json={"model": self._model, "input": chunk},
+                )
+                response.raise_for_status()
+                payload = response.json()
+            except (httpx.HTTPError, ValueError) as exc:
+                logger.debug("embeddings api: HTTP error: %s", exc)
+                raise EmbeddingError(f"The embedding endpoint could not be reached: {exc}") from exc
+
+            items = payload.get("data")
+            if not isinstance(items, list):
+                raise EmbeddingError("The embedding endpoint returned no data array.")
+            logger.debug("embeddings api: received %d embedding items", len(items))
+            items = sorted(items, key=lambda item: item.get("index", 0))
+            all_embeddings.extend(
+                [_normalise([float(value) for value in item["embedding"]]) for item in items]
+            )
+
+        return all_embeddings
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -90,6 +112,11 @@ class _LocalBackend:
         self.model = SentenceTransformer(source, device=settings.embedding_device)
 
     def encode(self, texts: list[str]) -> list[list[float]]:
+        logger.debug(
+            "_LocalBackend.encode: encoding %d texts with batch_size=%d",
+            len(texts),
+            EMBEDDING_BATCH_SIZE,
+        )
         return [
             list(map(float, vector))
             for vector in self.model.encode(
@@ -105,13 +132,20 @@ class _LocalBackend:
 
 def resolve_model_source(settings: Settings) -> tuple[str, bool]:
     local = settings.embedding_local_path.strip()
+    logger.debug(
+        "resolve_model_source: checking model source for model=%s local_path=%r",
+        settings.embedding_model,
+        local,
+    )
     if local:
         candidate = Path(local)
         if candidate.is_dir():
+            logger.debug("resolve_model_source: local path %s confirmed", candidate)
             return str(candidate), True
         for prefix in (Path("usage"), Path("sidecardb")):
             prefixed = prefix / local
             if prefixed.is_dir():
+                logger.debug("resolve_model_source: prefixed local path %s confirmed", prefixed)
                 return str(prefixed), True
         logger.warning(
             "embeddings: EMBEDDING_LOCAL_PATH %s is not a directory; "
@@ -133,6 +167,9 @@ class Embedder:
         return self._settings.embedding_provider != PROVIDER_NONE
 
     def _load(self):
+        logger.debug(
+            "Embedder._load: backend load requested (loaded=%s)", self._backend is not None
+        )
         if self._backend is None:
             with _backend_lock:
                 if self._backend is None:

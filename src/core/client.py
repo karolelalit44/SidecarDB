@@ -1,22 +1,17 @@
 import asyncio
 import contextlib
 import time
-from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
-from unicodedata import category
+from typing import Any
 
 from core.answer import bind_template
-from core.capabilities import Catalog, Embedder, Planner, Runner
+from core.capabilities import DatabaseGateway, Embedder, Planner
 from core.catalog import SchemaGraph
 from core.config import Settings, get_settings
 from core.constants import (
-    ALLOWED_CONTROL,
     APP_NAME,
-    BLOCKED_CATEGORIES,
     DATABASE_DOWN,
     DATABASE_UP,
-    DISALLOWED_SUBSTRINGS,
     ELAPSED_PRECISION,
     EMBEDDING_OFF,
     ERROR_MESSAGE_MAX_CHARS,
@@ -24,11 +19,8 @@ from core.constants import (
     HEALTH_PING_CACHE_SECONDS,
     LOG_LLM_PAYLOADS,
     LOG_SQL,
-    MAX_QUESTION_LENGTH,
-    MIN_QUESTION_LENGTH,
     NO_ANSWER_MESSAGE,
     NO_RECORDS_MESSAGE,
-    PLANNING_FAILED_MESSAGE,
     PROVIDER_API,
     PROVIDER_LOCAL,
     PROVIDER_NONE,
@@ -36,11 +28,10 @@ from core.constants import (
     STATUS_DEGRADED,
     STATUS_OK,
 )
-from core.exceptions import ConfigurationError, PlanningError, QuestionError
-from core.guard import statement_for
-from core.plan import Outcome, Plan, PlanPolicy
-from core.planning import PlanRequest
-from core.planning import make_plan as plan_a_question
+from core.exceptions import ConfigurationError
+from core.guard import statement_for, validate_question
+from core.plan import Outcome, PlanPolicy
+from core.planning import generate_plan
 from core.retrieval import SchemaIndex, link
 from core.wire import (
     HealthResponse,
@@ -48,12 +39,8 @@ from core.wire import (
 )
 from infra import embeddings
 from infra.db import Database
-from infra.execute import Sandbox
 from infra.llm import LLMClient
 from utils.logging_config import get_logger
-
-if TYPE_CHECKING:
-    from fastapi import FastAPI
 
 logger = get_logger("client")
 
@@ -74,27 +61,34 @@ class SidecarDB:
         *,
         planner: Planner | None = None,
         embedder: Embedder | None = None,
-        runner: Runner | None = None,
-        catalog: Catalog | None = None,
+        database: DatabaseGateway | None = None,
+        catalog: DatabaseGateway | None = None,
         **overrides: Any,
     ) -> None:
         env_file = overrides.pop("_env_file", None)
         if settings is not None and overrides:
             raise ValueError("Pass either a Settings instance or keyword overrides, not both.")
         self.settings = (
-            settings
-            if settings is not None
-            else get_settings(_env_file=env_file, **overrides)
+            settings if settings is not None else get_settings(_env_file=env_file, **overrides)
         )
         self.version = _detect_version()
 
+        effective_db = database if database is not None else catalog
         self._owns_planner = planner is None
         self._owns_embedder = embedder is None
-        self._owns_catalog = catalog is None
+        self._owns_database = effective_db is None
         self.planner = planner if planner is not None else LLMClient(self.settings)
         self.embedder = embedder if embedder is not None else embeddings.Embedder(self.settings)
-        self._catalog = catalog if catalog is not None else Database(self.settings)
-        self.runner = runner if runner is not None else self._default_runner()
+        self.database = effective_db if effective_db is not None else Database(self.settings)
+
+        logger.debug(
+            "SidecarDB initialized (version=%s schema=%s provider=%s model=%s database=%s)",
+            self.version,
+            self.settings.db_schema,
+            self.settings.embedding_provider,
+            self.settings.llm_model or "unset",
+            type(self.database).__name__,
+        )
 
         self.plan_policy = PlanPolicy()
 
@@ -105,17 +99,10 @@ class SidecarDB:
         self._graph: SchemaGraph | None = None
         self._index: SchemaIndex | None = None
 
-    def _default_runner(self) -> Runner:
-        if isinstance(self._catalog, Database):
-            return Sandbox(self._catalog)
-        raise ConfigurationError(
-            "No runner: pass runner= (a Statement executor) or leave catalog= unset "
-            "so the built-in Database can host the sandbox."
-        )
-
     def _verify_configuration(self) -> None:
         settings = self.settings
-        if self._owns_catalog and not settings.database_url:
+        logger.debug("verification: checking required database, LLM, and embedding settings")
+        if self._owns_database and not settings.database_url:
             raise ConfigurationError(
                 "Mandatory dependency missing: DATABASE_URL is not configured."
             )
@@ -133,9 +120,15 @@ class SidecarDB:
                 raise ConfigurationError(
                     "Mandatory dependency missing: LLM_MODEL is not configured in environment."
                 )
+            logger.debug(
+                "verification: LLM settings valid (model=%s, base_url=%s)",
+                settings.llm_model,
+                settings.llm_base_url,
+            )
         logger.info("LLM configuration verification successful (model: %s).", settings.llm_model)
         if self._owns_embedder:
             self._verify_embeddings(settings)
+        logger.debug("verification: %d api_keys configured", len(settings.api_keys))
         logger.info("Startup prerequisite verification complete.")
 
     @staticmethod
@@ -171,7 +164,13 @@ class SidecarDB:
 
     async def start(self, *, require_database: bool = True) -> None:
         if self._started:
+            logger.debug("SidecarDB.start: already started, skipping initialization")
             return
+        logger.debug(
+            "SidecarDB.start: starting engine (require_database=%s, schema=%s)",
+            require_database,
+            self.settings.db_schema,
+        )
         self._verify_configuration()
         if not self.settings.api_keys:
             logger.warning(
@@ -189,18 +188,22 @@ class SidecarDB:
             )
             self._recovery_task = asyncio.create_task(self._recover())
         self._started = True
+        logger.debug("SidecarDB.start: engine successfully started")
 
     async def _refresh_catalog(self) -> SchemaGraph:
         started = time.perf_counter()
         logger.debug("refresh: introspecting the catalog of schema %s", self.settings.db_schema)
-        graph = await self._catalog.introspect()
+        graph = await self.database.introspect()
         logger.debug(
             "refresh: %d tables introspected in %d ms; rebuilding the schema index",
             len(graph.tables),
             round((time.perf_counter() - started) * 1000, ELAPSED_PRECISION),
         )
+        logger.debug("refresh: table names discovered: %s", ", ".join(graph.tables.keys()))
         self._graph = graph
-        self._index = await SchemaIndex(self.embedder, self.plan_policy).build(graph)
+        self._index = await SchemaIndex(self.embedder, self.plan_policy).build(
+            graph, cache_dir=self.settings.cache_dir
+        )
         logger.debug(
             "refresh: schema index %s",
             "ready" if self._index is not None and self._index.ready else "unavailable",
@@ -210,6 +213,7 @@ class SidecarDB:
 
     async def _recover(self) -> None:
         interval = RECOVERY_INTERVAL_SECONDS
+        logger.debug("SidecarDB._recover: recovery task initiated (interval=%.1fs)", interval)
         while not self._stop_event.is_set():
             try:
                 await self._refresh_catalog()
@@ -226,20 +230,22 @@ class SidecarDB:
                 await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
 
     async def stop(self) -> None:
+        logger.debug("SidecarDB.stop: stopping engine (started=%s)", self._started)
         self._stop_event.set()
         if self._recovery_task is not None:
             self._recovery_task.cancel()
             self._recovery_task = None
         if not self._started:
+            logger.debug("SidecarDB.stop: not started, returning")
             return
         self._started = False
-        if self._owns_catalog:
-            await self._catalog.close()
+        if self._owns_database:
+            await self.database.close()
         if self._owns_embedder:
             await self.embedder.aclose()
         self._graph = None
         self._index = None
-        logger.debug("client: stopped")
+        logger.debug("client: stopped; cleanup complete")
 
     async def __aenter__(self) -> "SidecarDB":
         await self.start()
@@ -249,22 +255,24 @@ class SidecarDB:
         await self.stop()
 
     async def search(self, question: str, request_id: str | None = None) -> SearchResponse:
-        question = (question or "").strip()
-        logger.debug("[%s] search received %d chars", request_id, len(question))
-
-        reason = self._reject_question(question)
-        if reason:
-            raise QuestionError(reason)
+        logger.debug(
+            "[%s] search pipeline initiated: question=%r",
+            request_id,
+            question,
+        )
+        clean_question = validate_question(question)
 
         if not self._started:
+            logger.debug("[%s] engine not started yet; starting now", request_id)
             await self.start(require_database=False)
         graph = self._graph
         if graph is None:
+            logger.debug("[%s] catalog not present in memory; refreshing now", request_id)
             graph = await self._refresh_catalog()
 
         started = time.perf_counter()
         try:
-            outcome = await self._run_pipeline(question, graph)
+            outcome = await self._run_pipeline(clean_question, graph)
         except Exception as exc:
             elapsed = round((time.perf_counter() - started) * 1000, ELAPSED_PRECISION)
             logger.error(
@@ -276,41 +284,52 @@ class SidecarDB:
                 exc_info=LOG_LLM_PAYLOADS,
             )
             raise
-        return self._respond(outcome, question, request_id, started)
-
-    def _reject_question(self, question: str) -> str | None:
-        if not question or len(question) < MIN_QUESTION_LENGTH:
-            return "The question is too short."
-        if len(question) > MAX_QUESTION_LENGTH:
-            return f"The question is too long (maximum {MAX_QUESTION_LENGTH} characters)."
-        for marker in DISALLOWED_SUBSTRINGS:
-            if marker in question:
-                logger.warning(
-                    "Rejected a %d-character question: disallowed symbols", len(question)
-                )
-                return "The question contains disallowed symbols or comment characters."
-        for ch in question:
-            if ch in ALLOWED_CONTROL:
-                continue
-            if category(ch) in BLOCKED_CATEGORIES:
-                logger.warning("Rejected question: unsupported control characters")
-                return "The question contains unsupported control or formatting characters."
-        if not any(ch.isalnum() for ch in question):
-            logger.warning("Rejected question: no alphanumeric character")
-            return "The question must contain at least one alphanumeric character."
-        return None
+        return self._respond(outcome, clean_question, request_id, started)
 
     async def _run_pipeline(self, question: str, graph: SchemaGraph) -> Outcome:
-        request = PlanRequest(question=question, graph=graph, policy=self.plan_policy)
-        tables, retrieval_mode, retrieved = await link(request, self._index)
-        logger.debug("link: mode=%s tables=%s", retrieval_mode.value, tables)
+        logger.debug("pipeline: beginning execution for question: %r", question)
+        logger.debug("pipeline: step 1 - schema linking (retrieval)")
+        tables, retrieval_mode, retrieved = await link(
+            question, graph, self._index, self.plan_policy
+        )
+        logger.debug(
+            "pipeline: step 1 complete - mode=%s retrieved_tables=%s final_tables=%s",
+            retrieval_mode.value,
+            retrieved,
+            tables,
+        )
 
-        request = replace(request, tables=tables)
-        plan = await self._plan_pipeline(request)
+        logger.debug(
+            "pipeline: step 2 - generating query plan with %d table candidate(s)", len(tables)
+        )
+        plan = await generate_plan(
+            question=question,
+            graph=graph,
+            tables=tables,
+            planner=self.planner,
+            policy=self.plan_policy,
+        )
+        logger.debug(
+            "pipeline: step 2 complete - plan accepted: intent=%s table=%s projection=%d "
+            "filter=%s %s",
+            plan.intent.value,
+            plan.table,
+            len(plan.projection),
+            plan.filter_column,
+            plan.filter_operator,
+        )
+
+        logger.debug("pipeline: step 3 - compiling plan to guarded SQL statement")
         statement = statement_for(plan, graph, self.settings.db_schema)
-        logger.debug("guard: statement composed (%d bound parameter(s))", len(statement.params))
+        logger.debug(
+            "pipeline: step 3 complete - statement composed: sql=%s, params_count=%d",
+            statement.sql,
+            len(statement.params),
+        )
 
-        rows = await self.runner.run(statement)
+        logger.debug("pipeline: step 4 - executing statement via database gateway")
+        rows = await self.database.execute(statement)
+        logger.debug("pipeline: step 4 complete - fetched %d row(s)", len(rows))
 
         return Outcome(
             plan=plan,
@@ -320,26 +339,6 @@ class SidecarDB:
             retrieval_mode=retrieval_mode,
         )
 
-    async def _plan_pipeline(self, request: PlanRequest) -> Plan:
-        policy = request.policy
-        plan_result = None
-        error = None
-        for attempt in range(policy.max_plan_attempts):
-            plan_result, error = await plan_a_question(request, self.planner, error, attempt)
-            if plan_result is not None:
-                break
-            logger.debug(
-                "plan: attempt %d of %d failed: %s",
-                attempt + 1,
-                policy.max_plan_attempts,
-                error,
-            )
-
-        if plan_result is None:
-            logger.error("No plan survived %d attempts: %s", policy.max_plan_attempts, error)
-            raise PlanningError(PLANNING_FAILED_MESSAGE)
-        return plan_result
-
     def _respond(
         self, outcome: Outcome, question: str, request_id: str | None, started: float
     ) -> SearchResponse:
@@ -348,10 +347,17 @@ class SidecarDB:
         if not rows:
             answer = NO_RECORDS_MESSAGE
             logger.debug(
-                "[%s] no rows returned; using the configured no-records message",
+                "[%s] no rows returned; using configured no-records message: %r",
                 request_id,
+                answer,
             )
         else:
+            logger.debug(
+                "[%s] binding template %r with %d row(s)",
+                request_id,
+                outcome.plan.template,
+                len(rows),
+            )
             answer = bind_template(
                 outcome.plan.template or "",
                 rows,
@@ -361,9 +367,12 @@ class SidecarDB:
             if not answer:
                 answer = NO_ANSWER_MESSAGE
                 logger.debug(
-                    "[%s] the plan carried no usable template; using the no-answer message",
+                    "[%s] template produced empty answer; using no-answer message: %r",
                     request_id,
+                    answer,
                 )
+            else:
+                logger.debug("[%s] template successfully bound answer: %r", request_id, answer)
 
         elapsed = round((time.perf_counter() - started) * 1000, ELAPSED_PRECISION)
         logger.debug(
@@ -409,15 +418,17 @@ class SidecarDB:
         )
 
     async def catalog(self, refresh: bool = False) -> SchemaGraph:
+        logger.debug("catalog requested (refresh=%s, cached=%s)", refresh, self._graph is not None)
         if refresh or self._graph is None:
             return await self._refresh_catalog()
         return self._graph
 
     async def health(self) -> HealthResponse:
+        logger.debug("health check initiated")
         connected = await self._ping()
         healthy = self._started and connected
         provider = self.settings.embedding_provider
-        return HealthResponse(
+        response = HealthResponse(
             status=STATUS_OK if healthy else STATUS_DEGRADED,
             app=APP_NAME,
             version=self.version,
@@ -426,6 +437,13 @@ class SidecarDB:
             model=self.settings.llm_model,
             embedding=EMBEDDING_OFF if provider == PROVIDER_NONE else self.settings.embedding_model,
         )
+        logger.debug(
+            "health check resolved: status=%s database=%s tables=%d",
+            response.status,
+            response.database,
+            response.tables,
+        )
+        return response
 
     async def _ping(self) -> bool:
         ttl = HEALTH_PING_CACHE_SECONDS
@@ -433,12 +451,12 @@ class SidecarDB:
         if self._last_ping is not None:
             cached_at, value = self._last_ping
             if now - cached_at < ttl:
+                logger.debug(
+                    "db ping check: using cached result %s (age=%.2fs)", value, now - cached_at
+                )
                 return value
-        value = await self._catalog.ping()
+        logger.debug("db ping check: executing live ping...")
+        value = await self.database.ping()
         self._last_ping = (time.monotonic(), value)
+        logger.debug("db ping check: result=%s", value)
         return value
-
-    def create_app(self) -> "FastAPI":
-        from core.server import create_app
-
-        return create_app(self)

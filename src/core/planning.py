@@ -10,6 +10,7 @@ from core.constants import (
     NULL_TESTS,
     OPERATOR_TEXT,
     OPERATORS,
+    PLANNING_FAILED_MESSAGE,
     TRUNCATION_MARK,
 )
 from core.exceptions import ConfigurationError, PlanningError, ProviderError
@@ -46,7 +47,11 @@ Inputs you are given:
 - SCHEMA: tables, columns, data types, operator-written comments.
 
 Field contracts:
-- table: required. The one table that answers the question.
+- table: required. The primary table that answers the question.
+- joins: optional list of join objects when data or filter conditions come from
+  related tables connected by foreign keys:
+  [{{"table": "...", "on_column": "...", "target_table": "...",
+    "target_column": "...", "join_type": "inner"|"left"}}]
 - intent: one of {", ".join(repr(i.value) for i in QueryIntent)}.
   "count" yields one row holding a row count. "aggregate" yields one row per group
   (or one row overall) holding measure_function applied to measure_column.
@@ -101,11 +106,30 @@ Read the field contracts above.
 
 
 def column_scope(plan: Plan, graph: SchemaGraph) -> set[str]:
-    info = graph.tables.get(plan.table)
-    return set(info.column_names) if info is not None else set()
+    tables_to_check = [plan.table]
+    for j in plan.joins:
+        if j.target_table not in tables_to_check:
+            tables_to_check.append(j.target_table)
+        if j.table not in tables_to_check:
+            tables_to_check.append(j.table)
+    cols: set[str] = set()
+    for t_name in tables_to_check:
+        info = graph.tables.get(t_name)
+        if info is not None:
+            for c in info.column_names:
+                cols.add(c)
+                cols.add(f"{t_name}.{c}")
+    logger.debug(
+        "column_scope: table=%s resolved %d column(s) across %d table(s)",
+        plan.table,
+        len(cols),
+        len(tables_to_check),
+    )
+    return cols
 
 
 def normalise_plan(plan: Plan, request: PlanRequest) -> Plan:
+    logger.debug("normalise_plan: table=%s intent=%s", plan.table, plan.intent.value)
     available = column_scope(plan, request.graph)
 
     def fix(column: str | None) -> str | None:
@@ -159,31 +183,63 @@ def normalise_plan(plan: Plan, request: PlanRequest) -> Plan:
         updates["measure_column"] = None
         updates["measure_function"] = None
 
+    logger.debug("normalise_plan: normalized updates: %s", updates)
     return plan.model_copy(update=updates)
 
 
 def check_plan(plan: Plan, request: PlanRequest) -> str | None:
+    logger.debug(
+        "check_plan: validating plan for table=%s intent=%s", plan.table, plan.intent.value
+    )
     if plan.table not in request.graph.tables:
+        logger.debug("check_plan: table %r does not exist in catalog", plan.table)
         return f"table '{plan.table}' does not exist in the catalog"
+
+    for join in plan.joins:
+        if join.table not in request.graph.tables:
+            logger.debug("check_plan: joined table %r not in catalog", join.table)
+            return f"joined table '{join.table}' does not exist in the catalog"
+        if join.target_table not in request.graph.tables:
+            logger.debug("check_plan: joined target table %r not in catalog", join.target_table)
+            return f"joined target table '{join.target_table}' does not exist in the catalog"
+        src_table = request.graph.tables[join.table]
+        tgt_table = request.graph.tables[join.target_table]
+        if join.on_column not in src_table.column_names:
+            logger.debug("check_plan: join column %r not in %s", join.on_column, join.table)
+            return f"join column '{join.on_column}' does not exist in table '{join.table}'"
+        if join.target_column not in tgt_table.column_names:
+            logger.debug(
+                "check_plan: target join column %r not in %s",
+                join.target_column,
+                join.target_table,
+            )
+            return (
+                f"join column '{join.target_column}' does not exist in table '{join.target_table}'"
+            )
 
     available = column_scope(plan, request.graph)
     policy = request.policy
 
     for value in (plan.measure_column, plan.filter_column, plan.order_by):
         if value and value not in available:
+            logger.debug("check_plan: unknown column %r", value)
             return _unknown_column(value, available, policy)
 
     for value in (*plan.projection, *plan.group_by, *plan.text_search_columns):
         if value not in available:
+            logger.debug("check_plan: unknown column %r", value)
             return _unknown_column(value, available, policy)
 
     if plan.filter_column and not plan.filter_operator:
+        logger.debug("check_plan: filter_column %r has no filter_operator", plan.filter_column)
         return "a filter column requires filter_operator"
 
     if plan.filter_operator and plan.filter_operator not in OPERATORS:
+        logger.debug("check_plan: unsupported filter_operator %r", plan.filter_operator)
         return "unsupported filter operator; use one of " + ", ".join(OPERATORS)
 
     if plan.filter_column and plan.filter_value is None and plan.filter_operator not in NULL_TESTS:
+        logger.debug("check_plan: filter_column without filter_value")
         return (
             "a filter column without filter_value is not a predicate; "
             "supply filter_value or leave the filter fields unset"
@@ -191,31 +247,46 @@ def check_plan(plan: Plan, request: PlanRequest) -> str | None:
 
     if plan.intent in MEASURED_INTENTS:
         if not plan.measure_function:
+            logger.debug("check_plan: aggregate plan missing measure_function")
             return "an aggregate plan requires measure_function"
         if plan.measure_function.needs_column:
             if not plan.measure_column:
+                logger.debug("check_plan: aggregate plan missing measure_column")
                 return "an aggregate plan requires measure_column"
-            if plan.measure_column not in request.graph.tables[plan.table].numeric_columns:
-                numeric = ", ".join(request.graph.tables[plan.table].numeric_columns) or "none"
+            if "." in plan.measure_column:
+                meas_tbl_name, meas_col_name = plan.measure_column.split(".", 1)
+                meas_tbl = request.graph.tables.get(meas_tbl_name)
+            else:
+                meas_tbl = request.graph.tables.get(plan.table)
+                meas_col_name = plan.measure_column
+            if meas_tbl and meas_col_name not in meas_tbl.numeric_columns:
+                numeric = ", ".join(meas_tbl.numeric_columns) or "none"
+                logger.debug("check_plan: column %r is not numeric", plan.measure_column)
                 return (
                     f"column '{plan.measure_column}' is not numeric; numeric columns are: {numeric}"
                 )
 
+    logger.debug("check_plan: plan passed all checks")
     return None
 
 
 def _unknown_column(value: str, available: set[str], policy: PlanPolicy) -> str:
     listing = ", ".join(sorted(available)[: policy.max_schema_columns])
-    return f"column '{value}' does not exist; available columns are: {listing}"
+    msg = f"column '{value}' does not exist; available columns are: {listing}"
+    logger.debug("_unknown_column: %s", msg)
+    return msg
 
 
 def prompt_chars(reserve: int, policy: PlanPolicy) -> int:
-    return max(policy.llm_context_tokens - reserve, 0) * policy.llm_chars_per_token
+    chars = max(policy.llm_context_tokens - reserve, 0) * policy.llm_chars_per_token
+    logger.debug("prompt_chars: reserve=%d tokens -> budget=%d chars", reserve, chars)
+    return chars
 
 
 def trim(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
+    logger.debug("trim: trimming text from %d to %d chars", len(text), limit)
     if limit <= len(TRUNCATION_MARK):
         return text[:limit]
     return text[: limit - len(TRUNCATION_MARK)] + TRUNCATION_MARK
@@ -230,6 +301,13 @@ def build_prompt(request: PlanRequest) -> str:
     schema = trim(
         request.graph.describe(request.tables, policy.max_schema_columns),
         budget - schema_overhead,
+    )
+    logger.debug(
+        "build_prompt: tables=%d budget=%d chars schema_overhead=%d chars schema_len=%d chars",
+        len(request.tables),
+        budget,
+        schema_overhead,
+        len(schema),
     )
 
     return USER.format(schema=schema, question=request.question)
@@ -295,12 +373,52 @@ async def make_plan(
     return result, None
 
 
+async def generate_plan(
+    question: str,
+    graph: SchemaGraph,
+    tables: list[str],
+    planner: "Planner",
+    policy: PlanPolicy | None = None,
+) -> Plan:
+    active_policy = policy or PlanPolicy()
+    request = PlanRequest(
+        question=question,
+        graph=graph,
+        policy=active_policy,
+        tables=tables,
+    )
+    logger.debug(
+        "planning pipeline: starting planning loop (max_attempts=%d)",
+        active_policy.max_plan_attempts,
+    )
+    error: str | None = None
+    for attempt in range(active_policy.max_plan_attempts):
+        plan_result, error = await make_plan(request, planner, error, attempt)
+        if plan_result is not None:
+            logger.debug(
+                "planning pipeline: plan produced on attempt %d of %d",
+                attempt + 1,
+                active_policy.max_plan_attempts,
+            )
+            return plan_result
+        logger.debug(
+            "plan: attempt %d of %d failed: %s",
+            attempt + 1,
+            active_policy.max_plan_attempts,
+            error,
+        )
+
+    logger.error("No plan survived %d attempts: %s", active_policy.max_plan_attempts, error)
+    raise PlanningError(PLANNING_FAILED_MESSAGE)
+
+
 __all__ = [
     "SYSTEM",
     "PlanRequest",
     "build_prompt",
     "check_plan",
     "column_scope",
+    "generate_plan",
     "make_plan",
     "normalise_plan",
     "prompt_chars",

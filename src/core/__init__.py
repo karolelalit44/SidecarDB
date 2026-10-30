@@ -12,7 +12,7 @@ from core.exceptions import (
     SearchError,
     SecurityError,
 )
-from core.plan import MeasureFunction, Plan, QueryIntent
+from core.plan import JoinSpec, JoinType, MeasureFunction, Plan, QueryIntent
 from core.retrieval import RetrievalMode
 from core.wire import HealthResponse, SearchRequest, SearchResponse
 
@@ -24,6 +24,8 @@ __all__ = [
     "EmbeddingError",
     "ExecutionError",
     "HealthResponse",
+    "JoinSpec",
+    "JoinType",
     "MeasureFunction",
     "Plan",
     "PlanningError",

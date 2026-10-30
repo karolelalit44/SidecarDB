@@ -4,7 +4,6 @@ import time
 import uuid
 from collections import deque
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,6 +12,7 @@ from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from core.catalog import SchemaGraph
+from core.client import SidecarDB
 from core.constants import (
     API_KEY_HEADER,
     APP_NAME,
@@ -41,9 +41,6 @@ from core.wire import (
 )
 from utils.logging_config import configure_logging, get_logger
 
-if TYPE_CHECKING:
-    from core.client import SidecarDB
-
 logger = get_logger("api")
 error_logger = get_logger("error")
 
@@ -66,12 +63,25 @@ class RateLimiter:
                 window = None
 
         if window is not None and len(window) >= self._limit:
+            logger.debug(
+                "rate_limiter: key=%s rejected (hits=%d >= limit=%d)",
+                key,
+                len(window),
+                self._limit,
+            )
             return False
 
         if window is None:
             window = deque()
             self._hits[key] = window
         window.append(now)
+        logger.debug(
+            "rate_limiter: key=%s accepted (hits=%d/%d in %.1fs)",
+            key,
+            len(window),
+            self._limit,
+            self._window,
+        )
         return True
 
 
@@ -91,6 +101,12 @@ class BodyCapMiddleware:
 
         request_id = scope.get("state", {}).get("request_id")
         declared = Headers(scope=scope).get("content-length")
+        logger.debug(
+            "[%s] body cap check: declared content-length=%s (max=%d)",
+            request_id,
+            declared,
+            self.max_bytes,
+        )
         if declared and declared.isdigit() and int(declared) > self.max_bytes:
             logger.warning("[%s] request body too large: %s bytes", request_id, declared)
             await self._reject(send, request_id)
@@ -103,7 +119,15 @@ class BodyCapMiddleware:
             nonlocal received
             message = await receive()
             if message["type"] == "http.request":
-                received += len(message.get("body", b""))
+                chunk_len = len(message.get("body", b""))
+                received += chunk_len
+                logger.debug(
+                    "[%s] received request body chunk: %d bytes (total=%d / max=%d)",
+                    request_id,
+                    chunk_len,
+                    received,
+                    self.max_bytes,
+                )
                 if received > self.max_bytes:
                     raise _BodyTooLargeError()
             return message
@@ -153,11 +177,25 @@ def _request_id(raw: str | None) -> str:
         and len(raw) <= REQUEST_ID_MAX_LENGTH
         and all(character.isalnum() or character in "-._" for character in raw)
     ):
+        logger.debug("request_id: accepted client-provided id=%s", raw)
         return raw
-    return uuid.uuid4().hex
+    generated = uuid.uuid4().hex
+    logger.debug(
+        "request_id: generated new id=%s (raw was %s)",
+        generated,
+        "invalid" if raw else "none",
+    )
+    return generated
 
 
 def _presented_key(request: Request) -> str:
+    has_auth = AUTHORIZATION_HEADER.lower() in request.headers
+    has_api_key = API_KEY_HEADER.lower() in request.headers
+    logger.debug(
+        "presented_key: checking headers (has_auth=%s, has_api_key=%s)",
+        has_auth,
+        has_api_key,
+    )
     authorization = request.headers.get(AUTHORIZATION_HEADER.lower(), "")
     if authorization[: len(BEARER_PREFIX)].lower() == BEARER_PREFIX:
         return authorization[len(BEARER_PREFIX) :].strip()
@@ -165,9 +203,16 @@ def _presented_key(request: Request) -> str:
 
 
 def _key_accepted(presented: str, accepted: list[str]) -> bool:
+    logger.debug(
+        "key_accepted: checking key (presented_len=%d, accepted_count=%d)",
+        len(presented),
+        len(accepted),
+    )
     if not presented:
         return False
-    return any(secrets.compare_digest(presented, candidate) for candidate in accepted)
+    result = any(secrets.compare_digest(presented, candidate) for candidate in accepted)
+    logger.debug("key_accepted: match=%s", result)
+    return result
 
 
 def _error(
@@ -177,6 +222,13 @@ def _error(
     request_id: str | None,
     headers: dict[str, str] | None = None,
 ) -> JSONResponse:
+    logger.debug(
+        "[%s] _error: building response status=%d kind=%s message=%r",
+        request_id,
+        status,
+        kind,
+        message,
+    )
     return JSONResponse(
         status_code=status,
         content={"error": kind, "message": message, "request_id": request_id},
@@ -184,13 +236,28 @@ def _error(
     )
 
 
-def create_app(sidecar_db: "SidecarDB | None" = None) -> FastAPI:
-    from core.client import SidecarDB as _SidecarDB
-
-    sidecar_db = sidecar_db if sidecar_db is not None else _SidecarDB()
+def create_app(sidecar_db: SidecarDB | None = None) -> FastAPI:
+    sidecar_db = sidecar_db if sidecar_db is not None else SidecarDB()
     settings = sidecar_db.settings
-    configure_logging()
+    configure_logging(
+        level=settings.log_level,
+        dependency_level=settings.log_dependency_level,
+        format_type=settings.log_format,
+        color=settings.log_color,
+    )
+    logger.debug(
+        "create_app: initializing FastAPI for %s v%s (schema=%s)",
+        APP_NAME,
+        sidecar_db.version,
+        settings.db_schema,
+    )
     limiter = RateLimiter(RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW_SECONDS)
+    logger.debug(
+        "create_app: rate_limiter enabled=%s (limit=%d window=%.1fs)",
+        RATE_LIMIT_ENABLED,
+        RATE_LIMIT_REQUESTS,
+        RATE_LIMIT_WINDOW_SECONDS,
+    )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -214,9 +281,20 @@ def create_app(sidecar_db: "SidecarDB | None" = None) -> FastAPI:
 
     @app.middleware("http")
     async def edge(request: Request, call_next):
-        request.state.request_id = _request_id(request.headers.get(REQUEST_ID_HEADER.lower()))
+        raw_req_id = request.headers.get(REQUEST_ID_HEADER.lower())
+        request.state.request_id = _request_id(raw_req_id)
         request_id = request.state.request_id
         started = time.perf_counter()
+
+        logger.debug(
+            "[%s] HTTP incoming %s %s from %s (headers=%d, custom_id=%s)",
+            request_id,
+            request.method,
+            request.url.path,
+            request.client.host if request.client else "unknown",
+            len(request.headers),
+            bool(raw_req_id and raw_req_id == request_id),
+        )
 
         protected = request.url.path.startswith(PROTECTED_PREFIX)
         if (
@@ -226,6 +304,10 @@ def create_app(sidecar_db: "SidecarDB | None" = None) -> FastAPI:
         ):
             logger.warning("[%s] rejected an unauthenticated request", request_id)
             return _error(401, "Unauthorized", "A valid API key is required.", request_id)
+        if protected and settings.api_keys:
+            logger.debug("[%s] request authentication succeeded", request_id)
+        elif protected:
+            logger.debug("[%s] protected route accessed with no API_KEYS configured", request_id)
 
         if protected and RATE_LIMIT_ENABLED:
             client = request.client.host if request.client else "unknown"
@@ -239,19 +321,26 @@ def create_app(sidecar_db: "SidecarDB | None" = None) -> FastAPI:
                     request_id,
                     headers={RETRY_AFTER_HEADER: str(retry_after)},
                 )
+            logger.debug("[%s] rate limit check passed for client %s", request_id, client)
 
-        logger.debug("[%s] %s %s", request_id, request.method, request.url.path)
+        logger.debug(
+            "[%s] dispatching %s %s to endpoint",
+            request_id,
+            request.method,
+            request.url.path,
+        )
         response = await call_next(request)
         elapsed = (time.perf_counter() - started) * 1000
         response.headers[REQUEST_ID_HEADER] = request_id
         response.headers["X-Process-Time-Ms"] = f"{elapsed:.{ELAPSED_PRECISION}f}"
         logger.debug(
-            "[%s] %s %s answered %d in %s ms",
+            "[%s] %s %s answered %d in %s ms (response headers: %d)",
             request_id,
             request.method,
             request.url.path,
             response.status_code,
             f"{elapsed:.{ELAPSED_PRECISION}f}",
+            len(response.headers),
         )
         return response
 
@@ -268,6 +357,13 @@ def create_app(sidecar_db: "SidecarDB | None" = None) -> FastAPI:
     async def handle_search_error(request: Request, exc: SearchError) -> JSONResponse:
         request_id = getattr(request.state, "request_id", None)
         error_logger.warning("[%s] %s: %s", request_id, type(exc).__name__, exc)
+        logger.debug(
+            "[%s] SearchError handled: status=%d error=%s message=%s",
+            request_id,
+            exc.status_code,
+            type(exc).__name__,
+            exc,
+        )
         return _error(exc.status_code, type(exc).__name__, str(exc), request_id)
 
     @app.exception_handler(Exception)
@@ -281,22 +377,38 @@ def create_app(sidecar_db: "SidecarDB | None" = None) -> FastAPI:
             type(exc).__name__,
             "".join(traceback.format_exception(exc)),
         )
+        logger.debug(
+            "[%s] unhandled exception: %s: %s",
+            request_id,
+            type(exc).__name__,
+            exc,
+        )
         return _error(500, "InternalServerError", "The request could not be completed.", request_id)
 
     @app.get("/health", response_model=HealthResponse)
     async def health() -> "HealthResponse | JSONResponse":
+        logger.debug("health: check requested")
         result = await sidecar_db.health()
+        logger.debug(
+            "health: check complete: status=%s database=%s tables=%d model=%s embedding=%s",
+            result.status,
+            result.database,
+            result.tables,
+            result.model,
+            result.embedding,
+        )
         if result.status != STATUS_OK:
             return JSONResponse(status_code=503, content=result.model_dump())
         return result
 
     @app.get("/api/v1/schema", response_model=SchemaGraph)
     async def schema(refresh: bool = Query(default=False)) -> SchemaGraph:
-        logger.debug("schema: refresh=%s", refresh)
+        logger.debug("schema: requested with refresh=%s", refresh)
         graph = await sidecar_db.catalog(refresh=refresh)
         logger.debug(
-            "schema: returning %d tables and %d columns",
+            "schema: returning %d tables (%s) and %d columns",
             len(graph.tables),
+            ", ".join(graph.tables.keys()),
             sum(len(info.column_names) for info in graph.tables.values()),
         )
         return graph
@@ -304,13 +416,19 @@ def create_app(sidecar_db: "SidecarDB | None" = None) -> FastAPI:
     @app.post("/api/v1/search", response_model=SearchResponse)
     async def search(payload: SearchRequest, request: Request) -> SearchResponse:
         request_id = getattr(request.state, "request_id", None)
-        logger.debug("[%s] search accepted: %r", request_id, payload.question)
+        logger.debug(
+            "[%s] /api/v1/search accepted question: %r (chars: %d)",
+            request_id,
+            payload.question,
+            len(payload.question),
+        )
         result = await sidecar_db.search(payload.question, request_id)
         logger.debug(
-            "[%s] search answered: rows=%d elapsed=%s ms",
+            "[%s] /api/v1/search answered: rows=%d elapsed=%s ms mode=%s",
             request_id,
             result.row_count,
             result.elapsed_ms,
+            result.retrieval_mode.value,
         )
         return result
 

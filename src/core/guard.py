@@ -1,31 +1,38 @@
 from typing import TYPE_CHECKING
+from unicodedata import category
 
 import sqlglot
 from sqlglot import exp
 
 from core.constants import (
+    ALLOWED_CONTROL,
     ALLOWED_FUNCTIONS,
     ANONYMOUS,
+    BLOCKED_CATEGORIES,
     BLOCKED_NODES,
     COUNT_ALIAS,
     DEFAULT_LIMIT,
     DIALECT,
+    DISALLOWED_SUBSTRINGS,
+    IDENTIFIER_EXTRA_CHARACTERS,
     MAX_LIMIT,
+    MAX_QUESTION_LENGTH,
     MEASURED_INTENTS,
+    MIN_QUESTION_LENGTH,
     NULL_TESTS,
     OPERATORS,
     PATTERN_OPERATORS,
+    PG_IDENTIFIER_MAX_LENGTH,
     ROOT_TYPE,
     WILDCARD,
 )
-from core.exceptions import SecurityError
+from core.exceptions import QuestionError, SecurityError
 from core.plan import (
     MeasureFunction,
     QueryIntent,
     Statement,
 )
 from utils.logging_config import get_logger
-from utils.sql import is_safe_identifier, quote_identifier
 
 if TYPE_CHECKING:
     from core.catalog import SchemaGraph
@@ -34,11 +41,80 @@ if TYPE_CHECKING:
 logger = get_logger("guard")
 
 
+def is_safe_identifier(name: str) -> bool:
+    if not name or len(name) > PG_IDENTIFIER_MAX_LENGTH:
+        return False
+    if not (name[0].isalpha() or name[0] == "_"):
+        return False
+    return all(
+        character.isalnum() or character in IDENTIFIER_EXTRA_CHARACTERS for character in name
+    )
+
+
+def quote_identifier(name: str) -> str:
+    return '"' + name.replace('"', '""') + '"'
+
+
+def quote_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
 def quote(name: str) -> str:
+    logger.debug("guard quote: identifier=%r", name)
     if not is_safe_identifier(name):
         logger.debug("guard: refusing to compose the identifier %r", name)
         raise SecurityError("The Guard cannot write this identifier safely.")
     return quote_identifier(name)
+
+
+def quote_column_ref(name: str) -> str:
+    if "." in name:
+        table_part, col_part = name.split(".", 1)
+        return f"{quote(table_part)}.{quote(col_part)}"
+    return quote(name)
+
+
+def validate_question(raw_question: str) -> str:
+    question = (raw_question or "").strip()
+    if not question or len(question) < MIN_QUESTION_LENGTH:
+        logger.debug(
+            "question rejected: length %d < MIN_QUESTION_LENGTH (%d)",
+            len(question),
+            MIN_QUESTION_LENGTH,
+        )
+        raise QuestionError("The question is too short.")
+    if len(question) > MAX_QUESTION_LENGTH:
+        logger.debug(
+            "question rejected: length %d > MAX_QUESTION_LENGTH (%d)",
+            len(question),
+            MAX_QUESTION_LENGTH,
+        )
+        raise QuestionError(f"The question is too long (maximum {MAX_QUESTION_LENGTH} characters).")
+    for marker in DISALLOWED_SUBSTRINGS:
+        if marker in question:
+            logger.warning(
+                "Rejected a %d-character question: disallowed symbols (%r)",
+                len(question),
+                marker,
+            )
+            raise QuestionError("The question contains disallowed symbols or comment characters.")
+    for ch in question:
+        if ch in ALLOWED_CONTROL:
+            continue
+        if category(ch) in BLOCKED_CATEGORIES:
+            logger.warning(
+                "Rejected question: unsupported control character %r (category %s)",
+                ch,
+                category(ch),
+            )
+            raise QuestionError(
+                "The question contains unsupported control or formatting characters."
+            )
+    if not any(ch.isalnum() for ch in question):
+        logger.warning("Rejected question: no alphanumeric character")
+        raise QuestionError("The question must contain at least one alphanumeric character.")
+    logger.debug("question validated successfully: %r (%d chars)", question, len(question))
+    return question
 
 
 def _unallowed_function(node: exp.Func) -> str | None:
@@ -51,32 +127,68 @@ def _unallowed_function(node: exp.Func) -> str | None:
 
 
 def like_pattern(value: str) -> str:
-    return value.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+    escaped = value.replace("\\", "\\\\").replace("%", r"\%").replace("_", r"\_")
+    logger.debug("guard like_pattern: escaped %r -> %r", value, escaped)
+    return escaped
 
 
 def statement_for(plan: "Plan", graph: "SchemaGraph", schema: str) -> Statement:
+    logger.debug(
+        "guard: statement_for initiated for table=%s intent=%s schema=%s",
+        plan.table,
+        plan.intent.value,
+        schema,
+    )
     sql, params = _compose(plan, graph)
+    logger.debug("guard: composed SQL: %s with %d bound parameter(s)", sql, len(params))
     validated = validate(sql, graph, schema)
+    logger.debug("guard: statement validated successfully")
     return Statement(sql=validated.sql, params=params)
 
 
 def _compose(plan: "Plan", graph: "SchemaGraph") -> tuple[str, tuple[str, ...]]:
+    logger.debug(
+        "guard _compose: table=%s intent=%s group_by=%s order_by=%s descending=%s",
+        plan.table,
+        plan.intent.value,
+        plan.group_by,
+        plan.order_by,
+        plan.descending,
+    )
     binder = _Binder()
-    group = f" GROUP BY {', '.join(quote(c) for c in plan.group_by)}" if plan.group_by else ""
+    group = (
+        f" GROUP BY {', '.join(quote_column_ref(c) for c in plan.group_by)}"
+        if plan.group_by
+        else ""
+    )
     order = ""
     if plan.order_by and plan.intent is not QueryIntent.count:
         direction = "DESC" if plan.descending else "ASC"
-        order = f" ORDER BY {quote(plan.order_by)} {direction}"
-    sql = f"SELECT {_projection(plan, graph)} FROM {quote(plan.table)}"
-    sql += _where(plan, binder, graph) + group + order
+        order = f" ORDER BY {quote_column_ref(plan.order_by)} {direction}"
+    projection_clause = _projection(plan, graph)
+    where_clause = _where(plan, binder, graph)
+    joins_clause = ""
+    if plan.joins:
+        parts = [
+            f"{'LEFT JOIN' if j.join_type.value == 'left' else 'INNER JOIN'} "
+            f"{quote(j.target_table)} ON "
+            f"{quote(j.table)}.{quote(j.on_column)} = "
+            f"{quote(j.target_table)}.{quote(j.target_column)}"
+            for j in plan.joins
+        ]
+        joins_clause = " " + " ".join(parts)
+    sql = f"SELECT {projection_clause} FROM {quote(plan.table)}{joins_clause}"
+    sql += where_clause + group + order
     if plan.intent is not QueryIntent.count and not (
         plan.intent in MEASURED_INTENTS and not plan.group_by
     ):
         sql += f" LIMIT {DEFAULT_LIMIT}"
+    logger.debug("guard _compose complete: sql=%r, bound_params=%s", sql, binder.params)
     return sql, tuple(binder.params)
 
 
 def _projection(plan: "Plan", graph: "SchemaGraph") -> str:
+    logger.debug("guard _projection: building projection for intent=%s", plan.intent.value)
     if plan.intent is QueryIntent.count:
         return f"COUNT(*) AS {COUNT_ALIAS}"
 
@@ -85,17 +197,20 @@ def _projection(plan: "Plan", graph: "SchemaGraph") -> str:
         measure_sql = f"COUNT(*) AS {COUNT_ALIAS}"
         if plan.measure_function is not MeasureFunction.count:
             assert plan.measure_column is not None
-            alias = f"{plan.measure_function.value}_of_{plan.measure_column}"
+            clean_alias = plan.measure_column.replace(".", "_")
+            alias = f"{plan.measure_function.value}_of_{clean_alias}"
             function = plan.measure_function.value.upper()
-            measure_sql = f"{function}({quote(plan.measure_column)}) AS {quote(alias)}"
+            measure_sql = (
+                f"{function}({quote_column_ref(plan.measure_column)}) AS {quote(alias)}"
+            )
         if plan.group_by:
-            group_cols = ", ".join(quote(column) for column in plan.group_by)
+            group_cols = ", ".join(quote_column_ref(column) for column in plan.group_by)
             return f"{group_cols}, {measure_sql}"
         return measure_sql
 
     if plan.projection:
         prefix = "DISTINCT " if plan.intent is QueryIntent.distinct else ""
-        return prefix + ", ".join(quote(column) for column in plan.projection)
+        return prefix + ", ".join(quote_column_ref(column) for column in plan.projection)
 
     table = graph.tables.get(plan.table)
     if table is None or not table.columns:
@@ -104,6 +219,12 @@ def _projection(plan: "Plan", graph: "SchemaGraph") -> str:
 
 
 def _where(plan: "Plan", binder: "_Binder", graph: "SchemaGraph | None" = None) -> str:
+    logger.debug(
+        "guard _where: building clauses (filter_col=%s, filter_op=%s, text_search=%s)",
+        plan.filter_column,
+        plan.filter_operator,
+        bool(plan.text_search_query),
+    )
     clauses: list[str] = []
 
     if plan.filter_column:
@@ -112,7 +233,7 @@ def _where(plan: "Plan", binder: "_Binder", graph: "SchemaGraph | None" = None) 
         operator = plan.filter_operator.upper()
         if operator not in OPERATORS:
             raise SecurityError("Unsupported filter operator.")
-        column = quote(plan.filter_column)
+        column = quote_column_ref(plan.filter_column)
         if operator in NULL_TESTS:
             clauses.append(f"{column} {operator}")
         elif plan.filter_value is None:
@@ -120,33 +241,48 @@ def _where(plan: "Plan", binder: "_Binder", graph: "SchemaGraph | None" = None) 
         elif operator in PATTERN_OPERATORS:
             clauses.append(f"{column} {operator} {binder.bind(like_pattern(plan.filter_value))}")
         else:
-            cast_type = ""
-            if graph and plan.table in graph.tables:
-                col = next(
-                    (c for c in graph.tables[plan.table].columns if c.name == plan.filter_column),
-                    None,
-                )
-                if col and col.data_type and col.data_type.lower() != "text":
-                    cast_type = f"::{col.data_type}"
-            clauses.append(f"{column} {operator} {binder.bind(plan.filter_value)}{cast_type}")
+            bound_param = binder.bind(plan.filter_value)
+            val_expr = bound_param
+            if graph:
+                target_tbl = plan.table
+                target_col = plan.filter_column
+                if "." in plan.filter_column:
+                    target_tbl, target_col = plan.filter_column.split(".", 1)
+                if target_tbl in graph.tables:
+                    col = next(
+                        (c for c in graph.tables[target_tbl].columns if c.name == target_col),
+                        None,
+                    )
+                    if col and col.data_type and col.data_type.lower() != "text":
+                        val_expr = f"CAST({bound_param} AS {col.data_type})"
+            clauses.append(f"{column} {operator} {val_expr}")
 
     if plan.text_search_query and plan.text_search_columns:
         pattern = binder.bind(like_pattern(plan.text_search_query))
-        parts = [f"{quote(column)} ILIKE {pattern}" for column in plan.text_search_columns]
+        parts = [
+            f"LOWER({quote_column_ref(column)}) LIKE LOWER({pattern})"
+            for column in plan.text_search_columns
+        ]
         clauses.append("(" + " OR ".join(parts) + ")")
 
     if not clauses:
+        logger.debug("guard _where: no WHERE clauses generated")
         return ""
-    return " WHERE " + " AND ".join(clauses)
+    result = " WHERE " + " AND ".join(clauses)
+    logger.debug("guard _where: generated clause: %s", result)
+    return result
 
 
 class _Binder:
-    def __init__(self) -> None:
+    def __init__(self, param_style: str = "numeric") -> None:
         self.params: list[str] = []
+        self.param_style = param_style
 
     def bind(self, value: str) -> str:
         self.params.append(value)
-        return f"${len(self.params)}"
+        param_placeholder = "?" if self.param_style == "qmark" else f"${len(self.params)}"
+        logger.debug("binder: bound parameter %s = %r", param_placeholder, value)
+        return param_placeholder
 
 
 def validate(sql: str, graph: "SchemaGraph | None", schema: str) -> Statement:
@@ -232,4 +368,14 @@ def validate(sql: str, graph: "SchemaGraph | None", schema: str) -> Statement:
     return Statement(tree.sql(dialect=DIALECT))
 
 
-__all__ = ["is_safe_identifier", "like_pattern", "quote", "statement_for", "validate"]
+__all__ = [
+    "is_safe_identifier",
+    "like_pattern",
+    "quote",
+    "quote_column_ref",
+    "quote_identifier",
+    "quote_literal",
+    "statement_for",
+    "validate",
+    "validate_question",
+]

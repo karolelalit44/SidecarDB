@@ -7,8 +7,9 @@ APP_NAME = "sidecardb"
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 8000
 DEFAULT_SCHEMA = "public"
+DEFAULT_CACHE_DIR = ".cache/sidecardb"
 
-LOG_LEVEL = "INFO"
+LOG_LEVEL = "DEBUG"
 LOG_DEPENDENCY_LEVEL = "WARNING"
 LOG_SQL = False
 LOG_LLM_PAYLOADS = False
@@ -104,6 +105,27 @@ BLOCKED_CATEGORIES = ("Cc", "Cf", "Cs")
 
 TYPE_CATEGORY_NUMERIC = "N"
 TYPE_CATEGORY_UNKNOWN = "X"
+NUMERIC_DATA_TYPES = frozenset((
+    "int",
+    "integer",
+    "bigint",
+    "smallint",
+    "tinyint",
+    "mediumint",
+    "numeric",
+    "decimal",
+    "dec",
+    "fixed",
+    "real",
+    "float",
+    "double",
+    "double precision",
+    "serial",
+    "bigserial",
+    "smallserial",
+    "number",
+    "money",
+))
 
 COMPARISON_OPERATORS = ("=", "!=", "<>", "<", "<=", ">", ">=")
 PATTERN_OPERATORS = ("LIKE", "ILIKE")
@@ -112,11 +134,6 @@ OPERATORS = (*COMPARISON_OPERATORS, *PATTERN_OPERATORS, *NULL_TESTS)
 DEFAULT_COMPARISON = COMPARISON_OPERATORS[0]
 COUNT_ALIAS = "record_count"
 WILDCARD = "*"
-
-INTENT_COUNT = "count"
-INTENT_AGGREGATE = "aggregate"
-INTENT_RETRIEVE = "retrieve"
-INTENT_DISTINCT = "distinct"
 
 SCALAR_INTENTS = frozenset(("count", "aggregate"))
 MEASURED_INTENTS = frozenset(("aggregate",))
@@ -133,7 +150,7 @@ TRUNCATION_MARK = " [...]"
 ANONYMOUS = "anonymous"
 DIALECT = "postgres"
 ROOT_TYPE = exp.Select
-ALLOWED_FUNCTIONS = frozenset(("count", "sum", "avg", "min", "max"))
+ALLOWED_FUNCTIONS = frozenset(("count", "sum", "avg", "min", "max", "lower"))
 BLOCKED_NODES = (
     exp.Insert,
     exp.Update,
@@ -225,3 +242,42 @@ FROM pg_class c
 JOIN pg_namespace n ON n.oid = c.relnamespace
 WHERE n.nspname = $1 AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
 ORDER BY c.relname"""
+
+CONSTRAINTS_SQL = """SELECT c.relname AS table_name,
+       a.attname AS column_name,
+       con.contype AS constraint_type
+FROM pg_constraint con
+JOIN pg_class c ON c.oid = con.conrelid
+JOIN pg_namespace n ON n.oid = c.relnamespace
+JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(con.conkey)
+WHERE n.nspname = $1
+  AND con.contype IN ('p', 'u')
+  AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+  AND a.attnum > 0
+  AND NOT a.attisdropped"""
+
+FOREIGN_KEYS_SQL = """SELECT s_rel.relname AS source_table,
+       s_att.attname AS source_column,
+       t_rel.relname AS target_table,
+       t_att.attname AS target_column
+FROM (
+    SELECT conrelid,
+           confrelid,
+           unnest(conkey) AS s_attnum,
+           unnest(confkey) AS t_attnum
+    FROM pg_constraint con
+    JOIN pg_namespace n ON n.oid = con.connamespace
+    WHERE n.nspname = $1 AND con.contype = 'f'
+) fk
+JOIN pg_class s_rel ON s_rel.oid = fk.conrelid
+JOIN pg_attribute s_att ON s_att.attrelid = fk.conrelid AND s_att.attnum = fk.s_attnum
+JOIN pg_class t_rel ON t_rel.oid = fk.confrelid
+JOIN pg_attribute t_att ON t_att.attrelid = fk.confrelid AND t_att.attnum = fk.t_attnum
+WHERE NOT s_att.attisdropped AND NOT t_att.attisdropped
+ORDER BY source_table, source_column"""
+
+ENUMS_SQL = """SELECT t.typname AS type_name,
+       e.enumlabel AS enum_label
+FROM pg_type t
+JOIN pg_enum e ON e.enumtypid = t.oid
+ORDER BY t.typname, e.enumsortorder"""
