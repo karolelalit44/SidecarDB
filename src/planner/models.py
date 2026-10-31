@@ -1,0 +1,143 @@
+from dataclasses import dataclass
+from enum import StrEnum
+from typing import TYPE_CHECKING
+
+from pydantic import BaseModel, Field, field_validator
+
+from config.constants import (
+    ERROR_MESSAGE_MAX_CHARS,
+    LLM_CHARS_PER_TOKEN,
+    LLM_CONTEXT_TOKENS,
+    LLM_MAX_TOKENS,
+    LLM_REPAIR_TEMPERATURE,
+    LLM_TEMPERATURE,
+    MAX_PLAN_ATTEMPTS,
+    MAX_SCHEMA_COLUMNS,
+    MAX_SCHEMA_TABLES,
+    REPAIR_CHAR_BUDGET,
+    RETRIEVAL_MIN_SCORE,
+    RETRIEVAL_SCORE_PRECISION,
+    RETRIEVAL_TOP_K,
+)
+
+if TYPE_CHECKING:
+    from retrieval.memory import RetrievalMode
+
+
+class QueryIntent(StrEnum):
+    count = "count"
+    aggregate = "aggregate"
+    retrieve = "retrieve"
+    distinct = "distinct"
+
+
+class MeasureFunction(StrEnum):
+    sum = "sum"
+    avg = "avg"
+    min = "min"
+    max = "max"
+    count = "count"
+
+    @property
+    def needs_column(self) -> bool:
+        return self is not MeasureFunction.count
+
+
+class JoinType(StrEnum):
+    inner = "inner"
+    left = "left"
+
+
+@dataclass(frozen=True, slots=True)
+class Statement:
+    sql: str
+    params: tuple[str, ...] = ()
+
+
+class JoinSpec(BaseModel):
+    table: str
+    on_column: str
+    target_table: str
+    target_column: str
+    join_type: JoinType = JoinType.inner
+
+
+class Plan(BaseModel):
+    intent: QueryIntent
+    table: str
+    joins: list[JoinSpec] = Field(default_factory=list)
+    measure_column: str | None = None
+    measure_function: MeasureFunction | None = None
+    filter_column: str | None = None
+    filter_value: str | None = None
+    filter_operator: str | None = None
+    projection: list[str] = Field(default_factory=list)
+    order_by: str | None = None
+    descending: bool = False
+    group_by: list[str] = Field(default_factory=list)
+    text_search_columns: list[str] = Field(default_factory=list)
+    text_search_query: str | None = None
+    template: str | None = Field(default=None, max_length=200)
+
+    @field_validator("joins", mode="before")
+    @classmethod
+    def _coerce_joins(cls, value: object) -> object:
+        if value is None:
+            return []
+        return value
+
+    @field_validator("projection", "group_by", "text_search_columns", mode="before")
+    @classmethod
+    def _coerce_list(cls, value: object) -> object:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            if not value.strip():
+                return []
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("order_by", mode="before")
+    @classmethod
+    def _coerce_order_by(cls, value: object) -> object:
+        if isinstance(value, list):
+            return str(value[0]) if value else None
+        return value
+
+
+@dataclass(frozen=True, slots=True)
+class PlanPolicy:
+    llm_temperature: float = LLM_TEMPERATURE
+    llm_repair_temperature: float = LLM_REPAIR_TEMPERATURE
+    repair_char_budget: int = REPAIR_CHAR_BUDGET
+    max_plan_attempts: int = MAX_PLAN_ATTEMPTS
+    error_message_max_chars: int = ERROR_MESSAGE_MAX_CHARS
+    llm_max_tokens: int = LLM_MAX_TOKENS
+    llm_chars_per_token: int = LLM_CHARS_PER_TOKEN
+    llm_context_tokens: int = LLM_CONTEXT_TOKENS
+    max_schema_tables: int = MAX_SCHEMA_TABLES
+    max_schema_columns: int = MAX_SCHEMA_COLUMNS
+    retrieval_top_k: int = RETRIEVAL_TOP_K
+    retrieval_min_score: float = RETRIEVAL_MIN_SCORE
+    retrieval_score_precision: int = RETRIEVAL_SCORE_PRECISION
+
+
+@dataclass(frozen=True, slots=True)
+class Outcome:
+    plan: Plan
+    statement: Statement
+    rows: list[dict]
+    retrieved_tables: list[str]
+    retrieval_mode: "RetrievalMode"
+
+
+__all__ = [
+    "JoinSpec",
+    "JoinType",
+    "MeasureFunction",
+    "Outcome",
+    "Plan",
+    "PlanPolicy",
+    "QueryIntent",
+    "Statement",
+]

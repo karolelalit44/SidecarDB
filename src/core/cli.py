@@ -2,9 +2,12 @@ import argparse
 import asyncio
 from collections.abc import Sequence
 
-from core.config import Settings
-from core.constants import DEFAULT_HOST, DEFAULT_PORT, DEFAULT_SCHEMA
-from utils.logging_config import get_logger
+from config.constants import DEFAULT_HOST, DEFAULT_PORT, DEFAULT_SCHEMA
+from config.settings import Settings
+from core.client import SidecarDB
+from core.logging import get_logger
+from server.app import create_app
+from storage.roles import create_read_only_role
 
 logger = get_logger("cli")
 
@@ -53,9 +56,6 @@ def build_parser() -> argparse.ArgumentParser:
 def serve(host: str | None, port: int | None, env_file: str | None) -> None:
     import uvicorn
 
-    from core.client import SidecarDB
-    from core.server import create_app
-
     effective_host = host if host is not None else DEFAULT_HOST
     effective_port = port if port is not None else DEFAULT_PORT
     logger.debug(
@@ -77,8 +77,6 @@ def serve(host: str | None, port: int | None, env_file: str | None) -> None:
 
 
 def setup_roles(admin_dsn: str, role: str | None, schema: str, password: str | None) -> None:
-    from infra.roles import create_read_only_role
-
     settings = Settings()
     effective_role = role or settings.db_role
     if not effective_role:

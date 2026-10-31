@@ -1,46 +1,38 @@
 import asyncio
 import contextlib
 import time
-from pathlib import Path
 from typing import Any
 
-from core.answer import bind_template
-from core.capabilities import DatabaseGateway, Embedder, Planner
-from core.catalog import SchemaGraph
-from core.config import Settings, get_settings
-from core.constants import (
+from catalog.manager import CatalogManager
+from catalog.models import SchemaGraph
+from config.constants import (
     APP_NAME,
     DATABASE_DOWN,
     DATABASE_UP,
     ELAPSED_PRECISION,
-    EMBEDDING_OFF,
     ERROR_MESSAGE_MAX_CHARS,
     EXPOSE_SQL,
     HEALTH_PING_CACHE_SECONDS,
-    LOG_LLM_PAYLOADS,
     LOG_SQL,
     NO_ANSWER_MESSAGE,
     NO_RECORDS_MESSAGE,
-    PROVIDER_API,
-    PROVIDER_LOCAL,
-    PROVIDER_NONE,
     RECOVERY_INTERVAL_SECONDS,
     STATUS_DEGRADED,
     STATUS_OK,
 )
+from config.settings import Settings, get_settings
 from core.exceptions import ConfigurationError
-from core.guard import statement_for, validate_question
-from core.plan import Outcome, PlanPolicy
-from core.planning import generate_plan
-from core.retrieval import SchemaIndex, link
-from core.wire import (
-    HealthResponse,
-    SearchResponse,
-)
-from infra import embeddings
-from infra.db import Database
-from infra.llm import LLMClient
-from utils.logging_config import get_logger
+from core.logging import get_logger
+from core.pipeline import run_search
+from core.protocols import DatabaseGateway, Embedder, Planner
+from guard.question import validate_question
+from planner.models import Outcome, PlanPolicy
+from providers.embeddings import Embedder as DefaultEmbedder
+from providers.llm import LLMClient
+from retrieval.memory import SchemaMemory
+from server.schemas import HealthResponse, SearchResponse
+from storage.connection import Database
+from synthesis.formatter import bind_template
 
 logger = get_logger("client")
 
@@ -78,26 +70,32 @@ class SidecarDB:
         self._owns_embedder = embedder is None
         self._owns_database = effective_db is None
         self.planner = planner if planner is not None else LLMClient(self.settings)
-        self.embedder = embedder if embedder is not None else embeddings.Embedder(self.settings)
+        self.embedder = embedder if embedder is not None else DefaultEmbedder(self.settings)
         self.database = effective_db if effective_db is not None else Database(self.settings)
 
         logger.debug(
-            "SidecarDB initialized (version=%s schema=%s provider=%s model=%s database=%s)",
+            "SidecarDB initialized (version=%s schema=%s embedding=%s model=%s database=%s)",
             self.version,
             self.settings.db_schema,
-            self.settings.embedding_provider,
+            self.settings.embedding_model,
             self.settings.llm_model or "unset",
             type(self.database).__name__,
         )
 
         self.plan_policy = PlanPolicy()
+        self._catalog_manager = CatalogManager(
+            database=self.database,
+            embedder=self.embedder,
+            policy=self.plan_policy,
+            storage_dir=self.settings.storage_dir,
+        )
 
         self._started = False
         self._recovery_task: asyncio.Task | None = None
         self._stop_event = asyncio.Event()
         self._last_ping: tuple[float, bool] | None = None
         self._graph: SchemaGraph | None = None
-        self._index: SchemaIndex | None = None
+        self._index: SchemaMemory | None = None
 
     def _verify_configuration(self) -> None:
         settings = self.settings
@@ -121,222 +119,149 @@ class SidecarDB:
                     "Mandatory dependency missing: LLM_MODEL is not configured in environment."
                 )
             logger.debug(
-                "verification: LLM settings valid (model=%s, base_url=%s)",
+                "verification: LLM provider configured with model=%s, base_url=%s",
                 settings.llm_model,
                 settings.llm_base_url,
             )
-        logger.info("LLM configuration verification successful (model: %s).", settings.llm_model)
         if self._owns_embedder:
-            self._verify_embeddings(settings)
-        logger.debug("verification: %d api_keys configured", len(settings.api_keys))
-        logger.info("Startup prerequisite verification complete.")
-
-    @staticmethod
-    def _verify_embeddings(settings: Settings) -> None:
-        logger.debug(
-            "verification: embeddings provider=%s model=%s local=%s device=%s",
-            settings.embedding_provider,
-            settings.embedding_model,
-            settings.embedding_local_path or "unset",
-            settings.embedding_device,
-        )
-        if settings.embedding_provider == PROVIDER_NONE:
-            logger.info("Embeddings are off; retrieval will use catalog order.")
-            return
-        if not settings.embedding_model:
-            raise ConfigurationError(
-                "Mandatory dependency missing: EMBEDDING_MODEL is not configured in environment."
-            )
-        if settings.embedding_provider == PROVIDER_API and not settings.embedding_api_base_url:
-            raise ConfigurationError(
-                "Mandatory dependency missing: "
-                "EMBEDDING_API_BASE_URL is not configured in environment."
-            )
-        if (
-            settings.embedding_provider == PROVIDER_LOCAL
-            and settings.embedding_local_path
-            and not Path(settings.embedding_local_path).is_dir()
-        ):
-            logger.warning(
-                "EMBEDDING_LOCAL_PATH %s does not exist; the model will be fetched from the Hub.",
+            logger.debug(
+                "verification: Embeddings configured (model=%s, dim=%d, path=%s)",
+                settings.embedding_model,
+                settings.embedding_dimensions,
                 settings.embedding_local_path,
             )
 
-    async def start(self, *, require_database: bool = True) -> None:
-        if self._started:
-            logger.debug("SidecarDB.start: already started, skipping initialization")
-            return
+    async def start(self, *, require_database: bool = True) -> "SidecarDB":
         logger.debug(
-            "SidecarDB.start: starting engine (require_database=%s, schema=%s)",
+            "start requested (require_database=%s, started=%s)",
             require_database,
-            self.settings.db_schema,
+            self._started,
         )
+        if self._started:
+            logger.debug("engine: already started, ignoring redundant start request")
+            return self
+
         self._verify_configuration()
-        if not self.settings.api_keys:
-            logger.warning(
-                "No API keys are configured (API_KEYS); the HTTP service will accept "
-                "unauthenticated requests. Set at least one key before exposing it."
+        self._stop_event.clear()
+
+        restored = self._catalog_manager.restore()
+        if restored is not None:
+            self._graph, self._index = restored
+            logger.info(
+                "Restored schema from %s; ready to serve queries immediately.",
+                self.settings.storage_dir,
             )
+
         try:
-            await self._refresh_catalog()
-        except Exception:
+            logger.debug("engine: connecting to database...")
+            if hasattr(self.database, "connect"):
+                await self.database.connect()
+            logger.debug("engine: database connected successfully")
+            if self._graph is None:
+                await self._refresh_catalog()
+        except Exception as exc:
             if require_database:
+                logger.error(
+                    "engine: mandatory database connection failed: %s: %s", type(exc).__name__, exc
+                )
+                await self.stop()
                 raise
-            logger.error(
-                "Startup continuing without a catalog; retrying every %.0fs.",
+            logger.warning(
+                "Database could not be reached at startup (%s). Starting in degraded mode; "
+                "a background worker will retry every %ds.",
+                exc,
                 RECOVERY_INTERVAL_SECONDS,
             )
-            self._recovery_task = asyncio.create_task(self._recover())
+            self._recovery_task = asyncio.create_task(
+                self._recovery_loop(), name="sidecardb-recovery"
+            )
+
         self._started = True
-        logger.debug("SidecarDB.start: engine successfully started")
-
-    async def _refresh_catalog(self) -> SchemaGraph:
-        started = time.perf_counter()
-        logger.debug("refresh: introspecting the catalog of schema %s", self.settings.db_schema)
-        graph = await self.database.introspect()
-        logger.debug(
-            "refresh: %d tables introspected in %d ms; rebuilding the schema index",
-            len(graph.tables),
-            round((time.perf_counter() - started) * 1000, ELAPSED_PRECISION),
-        )
-        logger.debug("refresh: table names discovered: %s", ", ".join(graph.tables.keys()))
-        self._graph = graph
-        self._index = await SchemaIndex(self.embedder, self.plan_policy).build(
-            graph, cache_dir=self.settings.cache_dir
-        )
-        logger.debug(
-            "refresh: schema index %s",
-            "ready" if self._index is not None and self._index.ready else "unavailable",
-        )
-        logger.info("Catalog mapped: %d tables", len(graph.tables))
-        return graph
-
-    async def _recover(self) -> None:
-        interval = RECOVERY_INTERVAL_SECONDS
-        logger.debug("SidecarDB._recover: recovery task initiated (interval=%.1fs)", interval)
-        while not self._stop_event.is_set():
-            try:
-                await self._refresh_catalog()
-                logger.info("Database recovered; the catalog is mapped again.")
-                return
-            except Exception as exc:
-                logger.debug(
-                    "recovery attempt failed: %s: %s; next try in %.1fs",
-                    type(exc).__name__,
-                    exc,
-                    interval,
-                )
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self._stop_event.wait(), timeout=interval)
+        logger.debug("engine: start complete (healthy=%s)", self._recovery_task is None)
+        return self
 
     async def stop(self) -> None:
-        logger.debug("SidecarDB.stop: stopping engine (started=%s)", self._started)
+        logger.debug("stop requested (started=%s)", self._started)
         self._stop_event.set()
         if self._recovery_task is not None:
             self._recovery_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._recovery_task
             self._recovery_task = None
-        if not self._started:
-            logger.debug("SidecarDB.stop: not started, returning")
-            return
-        self._started = False
+
         if self._owns_database:
+            logger.debug("engine: closing database connection...")
             await self.database.close()
         if self._owns_embedder:
+            logger.debug("engine: closing embedder...")
             await self.embedder.aclose()
+
+        self._started = False
         self._graph = None
         self._index = None
-        logger.debug("client: stopped; cleanup complete")
+        self._last_ping = None
+        logger.debug("engine: stop complete")
 
     async def __aenter__(self) -> "SidecarDB":
         await self.start()
         return self
 
-    async def __aexit__(self, *_exc_info: object) -> None:
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         await self.stop()
 
+    async def _recovery_loop(self) -> None:
+        logger.debug("recovery_loop: started (interval=%ds)", RECOVERY_INTERVAL_SECONDS)
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.sleep(RECOVERY_INTERVAL_SECONDS)
+            except asyncio.CancelledError:
+                break
+
+            if self._stop_event.is_set():
+                break
+
+            try:
+                logger.debug("recovery_loop: attempting database reconnect...")
+                if hasattr(self.database, "connect"):
+                    await self.database.connect()
+                logger.debug("recovery_loop: database reconnected; refreshing catalog...")
+                await self._refresh_catalog()
+                logger.info("Database recovered; sidecarDB is fully available.")
+                self._recovery_task = None
+                return
+            except Exception as exc:
+                logger.debug("Recovery attempt failed: %s", exc)
+
+    async def _refresh_catalog(self) -> SchemaGraph:
+        logger.debug("catalog refresh requested via CatalogManager")
+        self._graph, self._index = await self._catalog_manager.refresh()
+        return self._graph
+
     async def search(self, question: str, request_id: str | None = None) -> SearchResponse:
-        logger.debug(
-            "[%s] search pipeline initiated: question=%r",
-            request_id,
-            question,
-        )
-        clean_question = validate_question(question)
+        started = time.perf_counter()
+        logger.debug("[%s] search initiated: raw question=%r", request_id, question)
+        cleaned_question = validate_question(question)
+        logger.debug("[%s] question validated successfully: %r", request_id, cleaned_question)
 
         if not self._started:
-            logger.debug("[%s] engine not started yet; starting now", request_id)
-            await self.start(require_database=False)
-        graph = self._graph
-        if graph is None:
-            logger.debug("[%s] catalog not present in memory; refreshing now", request_id)
-            graph = await self._refresh_catalog()
-
-        started = time.perf_counter()
-        try:
-            outcome = await self._run_pipeline(clean_question, graph)
-        except Exception as exc:
-            elapsed = round((time.perf_counter() - started) * 1000, ELAPSED_PRECISION)
-            logger.error(
-                "[%s] search failed after %s ms: %s: %s",
-                request_id,
-                elapsed,
-                type(exc).__name__,
-                exc,
-                exc_info=LOG_LLM_PAYLOADS,
+            logger.debug(
+                "[%s] engine not started; calling start(require_database=True)", request_id
             )
-            raise
-        return self._respond(outcome, clean_question, request_id, started)
+            await self.start()
+
+        graph = await self.catalog()
+        outcome = await self._run_pipeline(cleaned_question, graph)
+        return self._respond(outcome, cleaned_question, request_id, started)
 
     async def _run_pipeline(self, question: str, graph: SchemaGraph) -> Outcome:
-        logger.debug("pipeline: beginning execution for question: %r", question)
-        logger.debug("pipeline: step 1 - schema linking (retrieval)")
-        tables, retrieval_mode, retrieved = await link(
-            question, graph, self._index, self.plan_policy
-        )
-        logger.debug(
-            "pipeline: step 1 complete - mode=%s retrieved_tables=%s final_tables=%s",
-            retrieval_mode.value,
-            retrieved,
-            tables,
-        )
-
-        logger.debug(
-            "pipeline: step 2 - generating query plan with %d table candidate(s)", len(tables)
-        )
-        plan = await generate_plan(
+        return await run_search(
             question=question,
             graph=graph,
-            tables=tables,
+            index=self._index,
             planner=self.planner,
+            database=self.database,
             policy=self.plan_policy,
-        )
-        logger.debug(
-            "pipeline: step 2 complete - plan accepted: intent=%s table=%s projection=%d "
-            "filter=%s %s",
-            plan.intent.value,
-            plan.table,
-            len(plan.projection),
-            plan.filter_column,
-            plan.filter_operator,
-        )
-
-        logger.debug("pipeline: step 3 - compiling plan to guarded SQL statement")
-        statement = statement_for(plan, graph, self.settings.db_schema)
-        logger.debug(
-            "pipeline: step 3 complete - statement composed: sql=%s, params_count=%d",
-            statement.sql,
-            len(statement.params),
-        )
-
-        logger.debug("pipeline: step 4 - executing statement via database gateway")
-        rows = await self.database.execute(statement)
-        logger.debug("pipeline: step 4 complete - fetched %d row(s)", len(rows))
-
-        return Outcome(
-            plan=plan,
-            statement=statement,
-            rows=rows,
-            retrieved_tables=retrieved,
-            retrieval_mode=retrieval_mode,
+            schema=self.settings.db_schema,
         )
 
     def _respond(
@@ -427,7 +352,6 @@ class SidecarDB:
         logger.debug("health check initiated")
         connected = await self._ping()
         healthy = self._started and connected
-        provider = self.settings.embedding_provider
         response = HealthResponse(
             status=STATUS_OK if healthy else STATUS_DEGRADED,
             app=APP_NAME,
@@ -435,7 +359,7 @@ class SidecarDB:
             database=DATABASE_UP if connected else DATABASE_DOWN,
             tables=len(self._graph.names) if self._graph is not None else 0,
             model=self.settings.llm_model,
-            embedding=EMBEDDING_OFF if provider == PROVIDER_NONE else self.settings.embedding_model,
+            embedding=self.settings.embedding_model,
         )
         logger.debug(
             "health check resolved: status=%s database=%s tables=%d",
@@ -460,3 +384,6 @@ class SidecarDB:
         self._last_ping = (time.monotonic(), value)
         logger.debug("db ping check: result=%s", value)
         return value
+
+
+__all__ = ["SidecarDB", "_detect_version"]

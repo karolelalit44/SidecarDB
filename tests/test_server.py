@@ -1,10 +1,10 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from core.catalog import ColumnInfo, SchemaGraph, TableInfo
+from catalog.models import ColumnInfo, SchemaGraph, TableInfo
 from core.client import SidecarDB
-from core.plan import Statement
-from core.server import create_app
+from planner.models import Statement
+from server.app import create_app
 
 
 class FakeDatabaseAdapter:
@@ -35,6 +35,18 @@ class FakeDatabaseAdapter:
         self.closed = True
 
 
+class FakeEmbedder:
+    @property
+    def enabled(self) -> bool:
+        return True
+
+    async def aencode(self, texts: list[str]) -> list[list[float]]:
+        return [[1.0, 0.0] for _ in texts]
+
+    async def aclose(self) -> None:
+        pass
+
+
 class FakePlanner:
     async def complete_json(
         self, system_prompt: str, user_prompt: str, temperature: float | None = None
@@ -48,10 +60,16 @@ class FakePlanner:
 
 
 @pytest.fixture
-def test_app():
+def test_app(tmp_path):
     fake_db = FakeDatabaseAdapter()
     fake_planner = FakePlanner()
-    db = SidecarDB(database=fake_db, planner=fake_planner)
+    fake_embedder = FakeEmbedder()
+    db = SidecarDB(
+        database=fake_db,
+        planner=fake_planner,
+        embedder=fake_embedder,
+        storage_dir=str(tmp_path),
+    )
     return create_app(db)
 
 

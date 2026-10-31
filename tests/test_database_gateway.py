@@ -1,10 +1,10 @@
 import pytest
 
-from core.capabilities import DatabaseGateway
-from core.catalog import ColumnInfo, SchemaGraph, TableInfo
+from catalog.models import ColumnInfo, SchemaGraph, TableInfo
 from core.client import SidecarDB
-from core.plan import Statement
-from infra.db import Database
+from core.protocols import DatabaseGateway
+from planner.models import Statement
+from storage.connection import Database
 
 
 class FakeDatabaseAdapter:
@@ -36,6 +36,18 @@ class FakeDatabaseAdapter:
         self.closed = True
 
 
+class FakeEmbedder:
+    @property
+    def enabled(self) -> bool:
+        return True
+
+    async def aencode(self, texts: list[str]) -> list[list[float]]:
+        return [[1.0, 0.0] for _ in texts]
+
+    async def aclose(self) -> None:
+        pass
+
+
 class FakePlanner:
     async def complete_json(
         self, system_prompt: str, user_prompt: str, temperature: float | None = None
@@ -53,10 +65,16 @@ def test_fake_database_implements_gateway_protocol():
 
 
 @pytest.mark.asyncio
-async def test_sidecardb_uses_unified_database_gateway():
+async def test_sidecardb_uses_unified_database_gateway(tmp_path):
     fake_db = FakeDatabaseAdapter(tables={"products": ["id", "title", "price"]})
     fake_planner = FakePlanner()
-    db = SidecarDB(database=fake_db, planner=fake_planner)
+    fake_embedder = FakeEmbedder()
+    db = SidecarDB(
+        database=fake_db,
+        planner=fake_planner,
+        embedder=fake_embedder,
+        storage_dir=str(tmp_path),
+    )
 
     await db.start(require_database=False)
     health = await db.health()
@@ -81,7 +99,7 @@ async def test_sidecardb_uses_unified_database_gateway():
 async def test_database_sqlite_end_to_end(tmp_path):
     import sqlite3
 
-    from core.config import Settings
+    from config.settings import Settings
 
     db_file = tmp_path / "test.db"
     conn = sqlite3.connect(db_file)

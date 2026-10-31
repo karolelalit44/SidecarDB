@@ -1,16 +1,16 @@
 import pytest
 
-from core.catalog import ColumnInfo, SchemaGraph, TableInfo
+from catalog.models import ColumnInfo, SchemaGraph, TableInfo
 from core.exceptions import QuestionError, SecurityError
-from core.guard import (
+from guard.question import validate_question
+from guard.quoting import (
     is_safe_identifier,
     quote_identifier,
     quote_literal,
-    statement_for,
-    validate,
-    validate_question,
 )
-from core.plan import JoinSpec, JoinType, Plan, QueryIntent
+from guard.sql import validate
+from planner.compiler import statement_for
+from planner.models import JoinSpec, JoinType, Plan, QueryIntent
 
 
 def test_validate_question_success():

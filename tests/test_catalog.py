@@ -1,9 +1,9 @@
-from core.catalog import (
+from catalog.models import (
     ColumnInfo,
     ForeignKeyInfo,
     SchemaGraph,
     TableInfo,
-    _allocate_column_budgets,
+    allocate_column_budgets,
 )
 
 
@@ -99,7 +99,7 @@ def test_allocate_column_budgets_fair_water_filling():
             name="large_d", columns=[ColumnInfo(name=f"c{i}", data_type="int") for i in range(60)]
         ),
     ]
-    alloc = _allocate_column_budgets(tables, 120)
+    alloc = allocate_column_budgets(tables, 120)
     assert alloc["small_a"] == 10
     assert alloc["small_b"] == 10
     assert alloc["large_c"] == 50
@@ -108,9 +108,9 @@ def test_allocate_column_budgets_fair_water_filling():
 
 
 def test_allocate_column_budgets_empty_and_zero():
-    assert _allocate_column_budgets([], 100) == {}
+    assert allocate_column_budgets([], 100) == {}
     table = TableInfo(name="t", columns=[ColumnInfo(name="c", data_type="int")])
-    assert _allocate_column_budgets([table], 0) == {}
+    assert allocate_column_budgets([table], 0) == {}
 
 
 def test_schema_graph_describe_no_starvation():

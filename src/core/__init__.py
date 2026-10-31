@@ -1,6 +1,3 @@
-from core.catalog import SchemaGraph
-from core.client import SidecarDB, _detect_version
-from core.config import Settings, get_settings
 from core.exceptions import (
     CatalogError,
     ConfigurationError,
@@ -12,34 +9,37 @@ from core.exceptions import (
     SearchError,
     SecurityError,
 )
-from core.plan import JoinSpec, JoinType, MeasureFunction, Plan, QueryIntent
-from core.retrieval import RetrievalMode
-from core.wire import HealthResponse, SearchRequest, SearchResponse
-
-__version__ = _detect_version()
+from core.logging import configure_logging, get_logger
+from core.protocols import DatabaseGateway, Embedder, Planner
 
 __all__ = [
     "CatalogError",
     "ConfigurationError",
+    "DatabaseGateway",
+    "Embedder",
     "EmbeddingError",
     "ExecutionError",
-    "HealthResponse",
-    "JoinSpec",
-    "JoinType",
-    "MeasureFunction",
-    "Plan",
+    "Planner",
     "PlanningError",
     "ProviderError",
-    "QueryIntent",
     "QuestionError",
-    "RetrievalMode",
-    "SchemaGraph",
     "SearchError",
-    "SearchRequest",
-    "SearchResponse",
     "SecurityError",
-    "Settings",
     "SidecarDB",
-    "__version__",
-    "get_settings",
+    "_detect_version",
+    "configure_logging",
+    "get_logger",
+    "run_search",
 ]
+
+
+def __getattr__(name: str):
+    if name in ("SidecarDB", "_detect_version"):
+        from core.client import SidecarDB, _detect_version
+
+        return SidecarDB if name == "SidecarDB" else _detect_version
+    if name == "run_search":
+        from core.pipeline import run_search
+
+        return run_search
+    raise AttributeError(f"module 'core' has no attribute {name!r}")

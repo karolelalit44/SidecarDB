@@ -1,9 +1,9 @@
-import httpx
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
 
-from core.config import Settings
-from core.constants import EMBEDDING_BATCH_SIZE
-from infra.embeddings import _ApiBackend, _normalise
+from config.settings import Settings
+from providers.embeddings import Embedder, _normalise, get_embedding_model
 
 
 def test_normalise():
@@ -14,39 +14,51 @@ def test_normalise():
     assert _normalise([0.0, 0.0]) == [0.0, 0.0]
 
 
+def test_get_embedding_model_loads_locally_when_files_exist(tmp_path):
+    (tmp_path / "config.json").write_text("{}", encoding="utf-8")
+
+    mock_st_cls = MagicMock()
+    mock_instance = MagicMock()
+    mock_st_cls.return_value = mock_instance
+
+    mock_module = MagicMock(SentenceTransformer=mock_st_cls)
+    with patch.dict("sys.modules", {"sentence_transformers": mock_module}):
+        model = get_embedding_model("mock/model", tmp_path, device="cpu")
+
+    mock_st_cls.assert_called_once_with(str(tmp_path), device="cpu")
+    mock_instance.save.assert_not_called()
+    assert model == mock_instance
+
+
+def test_get_embedding_model_downloads_and_saves_on_first_run(tmp_path):
+    target_dir = tmp_path / "downloaded_model"
+
+    mock_st_cls = MagicMock()
+    mock_instance = MagicMock()
+    mock_st_cls.return_value = mock_instance
+
+    mock_module = MagicMock(SentenceTransformer=mock_st_cls)
+    with patch.dict("sys.modules", {"sentence_transformers": mock_module}):
+        model = get_embedding_model("BAAI/bge-small-en-v1.5", target_dir, device="cpu")
+
+    mock_st_cls.assert_called_once_with("BAAI/bge-small-en-v1.5", device="cpu")
+    mock_instance.save.assert_called_once_with(str(target_dir))
+    assert model == mock_instance
+
+
 @pytest.mark.asyncio
-async def test_api_backend_chunking(monkeypatch):
+async def test_embedder_encodes_via_local_backend(monkeypatch):
     settings = Settings(
         database_url="postgresql://test:test@localhost:5432/test",
-        embedding_api_base_url="http://mock-api.local",
-        embedding_api_key="mock-key",
         embedding_model="mock-embed",
-        embedding_provider="api",
+        embedding_local_path="mock/path",
     )
-    backend = _ApiBackend(settings)
+    embedder = Embedder(settings)
 
-    num_texts = EMBEDDING_BATCH_SIZE * 2 + 5
-    texts = [f"text_{i}" for i in range(num_texts)]
+    mock_backend = MagicMock()
+    mock_backend.aencode = AsyncMock(return_value=[[0.1, 0.2], [0.3, 0.4]])
+    embedder._backend = mock_backend
 
-    called_batches: list[list[str]] = []
-
-    async def mock_post(url, headers, json):
-        input_texts = json["input"]
-        called_batches.append(input_texts)
-        return httpx.Response(
-            200,
-            json={"data": [{"index": i, "embedding": [1.0, 0.0]} for i in range(len(input_texts))]},
-            request=httpx.Request("POST", url),
-        )
-
-    monkeypatch.setattr(backend._client, "post", mock_post)
-
-    result = await backend.aencode(texts)
-
-    assert len(called_batches) == 3
-    assert len(called_batches[0]) == EMBEDDING_BATCH_SIZE
-    assert len(called_batches[1]) == EMBEDDING_BATCH_SIZE
-    assert len(called_batches[2]) == 5
-    assert len(result) == num_texts
-
-    await backend.aclose()
+    res = await embedder.aencode(["hello", "world"])
+    assert res == [[0.1, 0.2], [0.3, 0.4]]
+    assert embedder.enabled is True

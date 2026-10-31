@@ -2,8 +2,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from core.config import Settings
-from infra.db import Database
+from config.settings import Settings
+from storage.connection import Database
 
 
 @pytest.mark.asyncio
@@ -15,8 +15,8 @@ async def test_read_catalog_maps_constraints_fks_and_enums():
     db = Database(settings)
 
     mock_tables = [
-        {"name": "customers", "description": "Customer profiles", "row_estimate": 100},
-        {"name": "orders", "description": "Customer orders", "row_estimate": 500},
+        {"name": "customers", "description": "Customer profiles"},
+        {"name": "orders", "description": "Customer orders"},
     ]
 
     mock_columns = [
@@ -86,7 +86,7 @@ async def test_read_catalog_maps_constraints_fks_and_enums():
     mock_conn = AsyncMock()
 
     async def mock_fetch(query, *args):
-        if "pg_class" in query and "reltuples" in query:
+        if "pg_class" in query and "obj_description" in query:
             return mock_tables
         if "pg_attribute" in query and "format_type" in query:
             return mock_columns
@@ -107,7 +107,7 @@ async def test_read_catalog_maps_constraints_fks_and_enums():
 
     db._pool = mock_pool
 
-    graph = await db._read_catalog()
+    graph = await db.introspect()
 
     assert len(graph.tables) == 2
     assert "customers" in graph.tables

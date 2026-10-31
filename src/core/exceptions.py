@@ -32,3 +32,16 @@ class ProviderError(SearchError):
 
 class EmbeddingError(SearchError):
     status_code = 503
+
+
+__all__ = [
+    "CatalogError",
+    "ConfigurationError",
+    "EmbeddingError",
+    "ExecutionError",
+    "PlanningError",
+    "ProviderError",
+    "QuestionError",
+    "SearchError",
+    "SecurityError",
+]

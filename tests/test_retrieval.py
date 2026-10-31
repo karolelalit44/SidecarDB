@@ -1,8 +1,9 @@
 import pytest
 
-from core.catalog import ColumnInfo, SchemaGraph, TableInfo
-from core.plan import PlanPolicy
-from core.retrieval import SchemaIndex, dot, link, rank_fallback_tables
+from catalog.models import ColumnInfo, ForeignKeyInfo, SchemaGraph, TableInfo
+from planner.models import PlanPolicy
+from retrieval.linker import dot, link
+from retrieval.memory import SchemaMemory, _describe_table
 
 
 class FakeEmbedder:
@@ -34,10 +35,11 @@ def test_dot_product():
 
 
 @pytest.mark.asyncio
-async def test_tables_for_expands_candidates_beyond_default_top_k():
-    cols_a = [ColumnInfo(name=f"col_a_{i}", data_type="text") for i in range(15)]
-    table_a = TableInfo(name="table_a", columns=cols_a)
-
+async def test_tables_for_retrieves_candidates():
+    table_a = TableInfo(
+        name="table_a",
+        columns=[ColumnInfo(name="id", data_type="int")],
+    )
     table_b = TableInfo(name="table_b", columns=[ColumnInfo(name="col_b", data_type="text")])
     table_c = TableInfo(name="table_c", columns=[ColumnInfo(name="col_c", data_type="text")])
     table_d = TableInfo(name="table_d", columns=[ColumnInfo(name="col_d", data_type="text")])
@@ -48,52 +50,18 @@ async def test_tables_for_expands_candidates_beyond_default_top_k():
 
     embedder = FakeEmbedder()
     policy = PlanPolicy(retrieval_top_k=12, retrieval_min_score=0.1)
-    index = SchemaIndex(embedder, policy)
-    await index.build(graph)
+    memory = SchemaMemory(embedder, policy)
+    await memory.build(graph)
 
-    chosen = await index.tables_for(question="query", limit=4, min_score=0.1)
+    chosen = await memory.tables_for(question="query", limit=4, min_score=0.1)
     assert len(chosen) >= 3
     assert "table_a" in chosen
     assert "table_b" in chosen
     assert "table_c" in chosen
 
 
-def test_rank_fallback_tables_prioritizes_documented_entities():
-    tables = {
-        "alembic_version": TableInfo(
-            name="alembic_version", columns=[ColumnInfo(name="version", data_type="text")]
-        ),
-        "audit_logs": TableInfo(
-            name="audit_logs", row_estimate=10000, columns=[ColumnInfo(name="id", data_type="int")]
-        ),
-        "cases": TableInfo(
-            name="cases",
-            description="Crime incident records",
-            row_estimate=5000,
-            columns=[
-                ColumnInfo(name="id", data_type="int"),
-                ColumnInfo(name="title", data_type="text"),
-            ],
-        ),
-        "officers": TableInfo(
-            name="officers",
-            description="Active duty police officers",
-            row_estimate=200,
-            columns=[ColumnInfo(name="id", data_type="int")],
-        ),
-    }
-    graph = SchemaGraph(tables=tables)
-    ranked = rank_fallback_tables(graph, max_tables=4)
-    assert ranked[0] in ("cases", "officers")
-    assert ranked[1] in ("cases", "officers")
-    assert ranked[2] in ("audit_logs", "alembic_version")
-    assert ranked[3] in ("audit_logs", "alembic_version")
-
-
 @pytest.mark.asyncio
 async def test_link_1hop_relational_expansion():
-    from core.catalog import ForeignKeyInfo
-
     fk = ForeignKeyInfo(
         source_table="orders",
         source_column="customer_id",
@@ -107,12 +75,14 @@ async def test_link_1hop_relational_expansion():
     }
     graph = SchemaGraph(tables=tables, foreign_keys=[fk])
 
-    class MockIndex:
+    class MockMemory:
+        ready = True
+
         async def tables_for(self, question, limit, min_score):
             return ["orders"]
 
     active_policy = PlanPolicy(max_schema_tables=5)
-    names, mode, retrieved = await link("who made orders?", graph, MockIndex(), active_policy)
+    names, mode, retrieved = await link("who made orders?", graph, MockMemory(), active_policy)
 
     assert mode.value == "embedding"
     assert retrieved == ["orders"]
@@ -130,45 +100,49 @@ async def test_hybrid_lexical_token_boost():
             ColumnInfo(name="notes", data_type="text"),
         ],
     )
-    graph = SchemaGraph(tables={"items": table_items})
+    table_users = TableInfo(
+        name="users",
+        columns=[ColumnInfo(name="email", data_type="text")],
+    )
+    graph = SchemaGraph(tables={"items": table_items, "users": table_users})
+
+    desc_items = _describe_table(table_items)
+    desc_users = _describe_table(table_users)
 
     embedder = FakeEmbedder(
         vector_map={
-            "items": [0.5, 0.5, 0.0, 0.0],
-            "items.sku": [0.5, 0.5, 0.0, 0.0],
-            "items.notes": [0.5, 0.5, 0.0, 0.0],
+            desc_items: [0.5, 0.5, 0.0, 0.0],
+            desc_users: [0.5, 0.5, 0.0, 0.0],
             "what is the sku?": [0.5, 0.5, 0.0, 0.0],
         }
     )
-    index = SchemaIndex(embedder, PlanPolicy())
-    await index.build(graph)
+    memory = SchemaMemory(embedder, PlanPolicy())
+    await memory.build(graph)
 
-    hits = await index.search("what is the sku?", top_k=3)
-    sku_hit = next(h for h in hits if h.subject == "items.sku")
-    notes_hit = next(h for h in hits if h.subject == "items.notes")
-    assert sku_hit.score > notes_hit.score
+    hits = await memory.search("what is the sku?", top_k=2)
+    assert hits[0].table == "items"
+    assert hits[0].score > hits[1].score
 
 
 @pytest.mark.asyncio
-async def test_link_falls_back_to_ranked_catalog_when_no_match():
+async def test_link_returns_empty_when_no_match():
     tables = {
         "audit_log": TableInfo(name="audit_log", columns=[ColumnInfo(name="id", data_type="int")]),
         "users": TableInfo(
             name="users",
             description="User accounts",
-            row_estimate=100,
             columns=[ColumnInfo(name="id", data_type="int")],
         ),
     }
     graph = SchemaGraph(tables=tables)
     names, mode, retrieved = await link(question="unrelated query", graph=graph, index=None)
-    assert mode.value == "catalog"
-    assert names[0] == "users"
+    assert mode.value == "embedding"
+    assert names == []
     assert retrieved == []
 
 
 @pytest.mark.asyncio
-async def test_schema_vector_disk_caching(tmp_path):
+async def test_schema_persistence_and_restore(tmp_path):
     table = TableInfo(name="cases", columns=[ColumnInfo(name="id", data_type="int")])
     graph = SchemaGraph(tables={"cases": table})
 
@@ -190,15 +164,23 @@ async def test_schema_vector_disk_caching(tmp_path):
     embedder = CountingEmbedder()
     policy = PlanPolicy()
 
-    idx1 = SchemaIndex(embedder, policy)
-    await idx1.build(graph, cache_dir=tmp_path)
+    mem1 = SchemaMemory(embedder, policy)
+    await mem1.build(graph, storage_dir=tmp_path)
     assert call_count == 1
-    assert idx1.ready
+    assert mem1.ready
+    assert (tmp_path / "schema.json").is_file()
+    assert (tmp_path / "schema_vectors.npy").is_file()
 
-    idx2 = SchemaIndex(embedder, policy)
-    await idx2.build(graph, cache_dir=tmp_path)
+    mem2 = SchemaMemory(embedder, policy)
+    await mem2.build(graph, storage_dir=tmp_path)
     assert call_count == 1
-    assert idx2.ready
+    assert mem2.ready
+
+    restored = SchemaMemory.load_persisted(tmp_path, embedder, policy)
+    assert restored is not None
+    restored_graph, restored_memory = restored
+    assert "cases" in restored_graph.tables
+    assert restored_memory.ready
 
     table2 = TableInfo(
         name="cases",
@@ -208,7 +190,7 @@ async def test_schema_vector_disk_caching(tmp_path):
         ],
     )
     graph2 = SchemaGraph(tables={"cases": table2})
-    idx3 = SchemaIndex(embedder, policy)
-    await idx3.build(graph2, cache_dir=tmp_path)
+    mem3 = SchemaMemory(embedder, policy)
+    await mem3.build(graph2, storage_dir=tmp_path)
     assert call_count == 2
-    assert idx3.ready
+    assert mem3.ready

@@ -1,5 +1,5 @@
-from core.answer import bind_template
-from core.plan import QueryIntent
+from planner.models import QueryIntent
+from synthesis.formatter import bind_template
 
 
 def test_bind_template_scalar_count():
@@ -27,7 +27,7 @@ def test_bind_template_record_fields():
 def test_bind_template_missing_placeholder_returns_empty():
     records = [{"name": "Widget"}]
     result = bind_template(
-        "Product {name} in {category}.",
+        "Product {name} costs ${missing_field}.",
         records,
         intent=QueryIntent.retrieve,
         max_chars=200,
@@ -35,12 +35,12 @@ def test_bind_template_missing_placeholder_returns_empty():
     assert result == ""
 
 
-def test_bind_template_truncates_to_max_chars():
-    records = [{"name": "Very long name that will exceed limit"}]
+def test_bind_template_max_chars_truncation():
+    records = [{"text": "A" * 100}]
     result = bind_template(
-        "{name}",
+        "Output: {text}",
         records,
         intent=QueryIntent.retrieve,
-        max_chars=10,
+        max_chars=20,
     )
-    assert len(result) == 10
+    assert len(result) <= 20

@@ -1,9 +1,9 @@
 import pytest
 
-from core.catalog import ColumnInfo, SchemaGraph, TableInfo
+from catalog.models import ColumnInfo, SchemaGraph, TableInfo
 from core.exceptions import PlanningError
-from core.plan import PlanPolicy, QueryIntent
-from core.planning import generate_plan
+from planner.generator import generate_plan
+from planner.models import PlanPolicy, QueryIntent
 
 
 class ScriptedPlanner:
